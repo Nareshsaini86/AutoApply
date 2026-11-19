@@ -1,0 +1,6 @@
+{
+  "name": "ApplyFlow",
+  "description": "Automated LinkedIn job application and Gmail follow-up tracker with AI parsing and resume attachment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

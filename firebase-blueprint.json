@@ -1,0 +1,249 @@
+{
+  "entities": {
+    "CandidateProfile": {
+      "title": "CandidateProfile",
+      "description": "Candidate profile details, CTC/notice period metadata, and resume summary stored per user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID of the candidate."
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full name of the candidate."
+        },
+        "email": {
+          "type": "string",
+          "description": "Candidate email address."
+        },
+        "phone": {
+          "type": "string",
+          "description": "Candidate phone number."
+        },
+        "linkedinUrl": {
+          "type": "string",
+          "description": "Candidate LinkedIn profile URL."
+        },
+        "currentRole": {
+          "type": "string",
+          "description": "Current job title."
+        },
+        "totalExperience": {
+          "type": "string",
+          "description": "Total years of professional experience."
+        },
+        "currentCtc": {
+          "type": "string",
+          "description": "Current CTC compensation."
+        },
+        "expectedCtc": {
+          "type": "string",
+          "description": "Expected CTC compensation."
+        },
+        "noticePeriod": {
+          "type": "string",
+          "description": "Notice period duration."
+        },
+        "currentLocation": {
+          "type": "string",
+          "description": "Current city and state."
+        },
+        "skillsSummary": {
+          "type": "string",
+          "description": "Core technical skills."
+        },
+        "resumeSummary": {
+          "type": "string",
+          "description": "Detailed summary extracted from the resume used by AI when tailoring emails."
+        },
+        "resumeFileName": {
+          "type": "string",
+          "description": "Active resume PDF file name."
+        },
+        "autoFollowUpSend": {
+          "type": "boolean",
+          "description": "Whether clicking Follow Up sends the email automatically or previews first."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of profile creation (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last profile update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "fullName",
+        "email",
+        "phone",
+        "linkedinUrl",
+        "currentRole",
+        "totalExperience",
+        "currentCtc",
+        "expectedCtc",
+        "noticePeriod",
+        "currentLocation",
+        "skillsSummary",
+        "resumeSummary",
+        "resumeFileName",
+        "autoFollowUpSend",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "JobApplication": {
+      "title": "JobApplication",
+      "description": "Tracked job application sent via Gmail with company, status, duplicate key, and follow-up history.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID of the owner."
+        },
+        "companyName": {
+          "type": "string",
+          "description": "Display name of the hiring company."
+        },
+        "companyNormalized": {
+          "type": "string",
+          "description": "Lowercase normalized company name for duplicate checks."
+        },
+        "jobTitle": {
+          "type": "string",
+          "description": "Role title from the LinkedIn job post."
+        },
+        "recruiterEmail": {
+          "type": "string",
+          "description": "Lowercase recruiter email address."
+        },
+        "recruiterName": {
+          "type": "string",
+          "description": "Recruiter name if known."
+        },
+        "location": {
+          "type": "string",
+          "description": "Job location."
+        },
+        "workMode": {
+          "type": "string",
+          "description": "Remote, Hybrid, or Onsite."
+        },
+        "rawPostText": {
+          "type": "string",
+          "description": "Original pasted LinkedIn post text."
+        },
+        "emailSubject": {
+          "type": "string",
+          "description": "Subject of the sent application email."
+        },
+        "emailBody": {
+          "type": "string",
+          "description": "Body of the sent application email."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "APPLIED",
+            "FOLLOW_UP_SENT",
+            "REPLIED",
+            "INTERVIEW",
+            "OFFER",
+            "REJECTED"
+          ],
+          "description": "Current application tracking status."
+        },
+        "gmailThreadId": {
+          "type": "string",
+          "description": "Gmail thread ID returned on send for threaded follow-ups and reply checks."
+        },
+        "gmailMessageId": {
+          "type": "string",
+          "description": "Gmail message ID returned on send."
+        },
+        "sendMethod": {
+          "type": "string",
+          "enum": [
+            "GMAIL_API",
+            "GMAIL_SMTP",
+            "GMAIL_INTENT"
+          ],
+          "description": "Method used to dispatch the email."
+        },
+        "followUpCount": {
+          "type": "integer",
+          "description": "Number of follow-up emails sent."
+        },
+        "lastFollowUpSubject": {
+          "type": "string",
+          "description": "Subject of the most recent follow-up email."
+        },
+        "lastFollowUpNote": {
+          "type": "string",
+          "description": "Body of the most recent follow-up email."
+        },
+        "appliedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when initial application was sent (FieldValue.serverTimestamp())."
+        },
+        "lastFollowUpAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional server timestamp when last follow-up was sent (FieldValue.serverTimestamp())."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of record creation (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "companyName",
+        "companyNormalized",
+        "jobTitle",
+        "recruiterEmail",
+        "recruiterName",
+        "location",
+        "workMode",
+        "rawPostText",
+        "emailSubject",
+        "emailBody",
+        "status",
+        "gmailThreadId",
+        "gmailMessageId",
+        "sendMethod",
+        "followUpCount",
+        "lastFollowUpSubject",
+        "lastFollowUpNote",
+        "appliedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/CandidateProfile"
+      },
+      "description": "Private candidate profile, compensation/notice details, and resume metadata owned by {userId}."
+    },
+    "/users/{userId}/applications/{applicationId}": {
+      "schema": {
+        "$ref": "#/entities/JobApplication"
+      },
+      "description": "Job applications and follow-up tracking records owned by {userId}."
+    }
+  }
+}

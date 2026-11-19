@@ -1,0 +1,162 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global deny-by-default safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidStatus(status) {
+      return status in ['APPLIED', 'FOLLOW_UP_SENT', 'REPLIED', 'INTERVIEW', 'OFFER', 'REJECTED'];
+    }
+
+    function isValidSendMethod(method) {
+      return method in ['GMAIL_API', 'GMAIL_SMTP', 'GMAIL_INTENT'];
+    }
+
+    function isValidCandidateProfile(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+             data.email is string && data.email.size() <= 150 &&
+             data.phone is string && data.phone.size() <= 40 &&
+             data.linkedinUrl is string && data.linkedinUrl.size() <= 300 &&
+             data.currentRole is string && data.currentRole.size() <= 120 &&
+             data.totalExperience is string && data.totalExperience.size() <= 60 &&
+             data.currentCtc is string && data.currentCtc.size() <= 60 &&
+             data.expectedCtc is string && data.expectedCtc.size() <= 60 &&
+             data.noticePeriod is string && data.noticePeriod.size() <= 60 &&
+             data.currentLocation is string && data.currentLocation.size() <= 120 &&
+             data.skillsSummary is string && data.skillsSummary.size() <= 1000 &&
+             data.resumeSummary is string && data.resumeSummary.size() <= 4000 &&
+             data.resumeFileName is string && data.resumeFileName.size() <= 200 &&
+             data.autoFollowUpSend is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidJobApplication(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.companyName is string && data.companyName.size() >= 1 && data.companyName.size() <= 150 &&
+             data.companyNormalized is string && data.companyNormalized.size() >= 1 && data.companyNormalized.size() <= 150 &&
+             data.jobTitle is string && data.jobTitle.size() >= 1 && data.jobTitle.size() <= 150 &&
+             data.recruiterEmail is string && data.recruiterEmail.size() >= 3 && data.recruiterEmail.size() <= 150 &&
+             data.recruiterName is string && data.recruiterName.size() <= 120 &&
+             data.location is string && data.location.size() <= 150 &&
+             data.workMode is string && data.workMode.size() <= 60 &&
+             data.rawPostText is string && data.rawPostText.size() <= 10000 &&
+             data.emailSubject is string && data.emailSubject.size() >= 1 && data.emailSubject.size() <= 250 &&
+             data.emailBody is string && data.emailBody.size() >= 1 && data.emailBody.size() <= 15000 &&
+             data.status is string && isValidStatus(data.status) &&
+             data.gmailThreadId is string && data.gmailThreadId.size() <= 128 &&
+             data.gmailMessageId is string && data.gmailMessageId.size() <= 128 &&
+             data.sendMethod is string && isValidSendMethod(data.sendMethod) &&
+             data.followUpCount is int && data.followUpCount >= 0 && data.followUpCount <= 50 &&
+             data.lastFollowUpSubject is string && data.lastFollowUpSubject.size() <= 250 &&
+             data.lastFollowUpNote is string && data.lastFollowUpNote.size() <= 5000 &&
+             data.appliedAt is timestamp && data.appliedAt <= request.time &&
+             (!('lastFollowUpAt' in data) || (data.lastFollowUpAt is timestamp && data.lastFollowUpAt <= request.time)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'fullName', 'email', 'phone', 'linkedinUrl',
+                         'currentRole', 'totalExperience', 'currentCtc', 'expectedCtc',
+                         'noticePeriod', 'currentLocation', 'skillsSummary',
+                         'resumeSummary', 'resumeFileName', 'autoFollowUpSend',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'fullName', 'email', 'phone', 'linkedinUrl',
+                         'currentRole', 'totalExperience', 'currentCtc', 'expectedCtc',
+                         'noticePeriod', 'currentLocation', 'skillsSummary',
+                         'resumeSummary', 'resumeFileName', 'autoFollowUpSend',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidCandidateProfile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidCandidateProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'fullName', 'email', 'phone', 'linkedinUrl',
+                         'currentRole', 'totalExperience', 'currentCtc', 'expectedCtc',
+                         'noticePeriod', 'currentLocation', 'skillsSummary',
+                         'resumeSummary', 'resumeFileName', 'autoFollowUpSend',
+                         'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /applications/{applicationId} {
+        allow get: if isOwner(userId) && isValidId(applicationId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(applicationId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'companyName', 'companyNormalized', 'jobTitle',
+                           'recruiterEmail', 'recruiterName', 'location', 'workMode',
+                           'rawPostText', 'emailSubject', 'emailBody', 'status',
+                           'gmailThreadId', 'gmailMessageId', 'sendMethod',
+                           'followUpCount', 'lastFollowUpSubject', 'lastFollowUpNote',
+                           'appliedAt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'companyName', 'companyNormalized', 'jobTitle',
+                           'recruiterEmail', 'recruiterName', 'location', 'workMode',
+                           'rawPostText', 'emailSubject', 'emailBody', 'status',
+                           'gmailThreadId', 'gmailMessageId', 'sendMethod',
+                           'followUpCount', 'lastFollowUpSubject', 'lastFollowUpNote',
+                           'appliedAt', 'lastFollowUpAt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidJobApplication(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(applicationId) &&
+                         isValidJobApplication(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().appliedAt == existing().appliedAt &&
+                         (
+                           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'status', 'followUpCount', 'lastFollowUpSubject',
+                             'lastFollowUpNote', 'lastFollowUpAt',
+                             'gmailThreadId', 'gmailMessageId', 'updatedAt'
+                           ])
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(applicationId);
+      }
+    }
+  }
+}
