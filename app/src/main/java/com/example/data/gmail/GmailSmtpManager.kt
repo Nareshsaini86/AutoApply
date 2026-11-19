@@ -173,7 +173,7 @@ class GmailSmtpManager(context: Context) {
     suspend fun fetchRecentEmailsViaImap(
         credentials: SmtpCredentials,
         mailbox: String = "INBOX",
-        limit: Int = 20
+        limit: Int = 25
     ): Result<List<EmailMessage>> = withContext(Dispatchers.IO) {
         var socket: SSLSocket? = null
         try {
@@ -221,9 +221,9 @@ class GmailSmtpManager(context: Context) {
 
             val startSeq = (existsCount - limit + 1).coerceAtLeast(1)
 
-            // Single batch FETCH for all messages (1 round-trip instead of N sequential round-trips)
+            // Single batch FETCH (up to 16KB body preview per message so HTML/MIME emails are readable)
             writer.write(
-                "A4 FETCH $startSeq:$existsCount (UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)] BODY.PEEK[TEXT]<0.900>)\r\n"
+                "A4 FETCH $startSeq:$existsCount (UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)] BODY.PEEK[TEXT]<0.16384>)\r\n"
             )
             writer.flush()
             val batchResp = readImapTaggedResponse(input, "A4")
@@ -555,15 +555,32 @@ class GmailSmtpManager(context: Context) {
         var subject = ""
         var date = ""
         var messageId = ""
-        val snippetLines = mutableListOf<String>()
-        val base64Lines = mutableListOf<String>()
-        var inBody = false
-        var sawBase64Encoding = false
+        val rawBodyLines = mutableListOf<String>()
+
+        // Track explicit IMAP section so attribute ordering (HEADER before TEXT or TEXT before HEADER) never breaks parsing
+        var section = if (headerLine.contains("BODY[TEXT]", ignoreCase = true) && !headerLine.contains("BODY[HEADER", ignoreCase = true)) {
+            "BODY"
+        } else {
+            "HEADER"
+        }
         var lastHeader = ""
 
         for (idx in 1 until lines.size) {
             val line = lines[idx]
-            if (!inBody) {
+            val trimmed = line.trim()
+
+            if (line.contains("BODY[HEADER", ignoreCase = true)) {
+                section = "HEADER"
+                lastHeader = ""
+                continue
+            }
+            if (line.contains("BODY[TEXT]", ignoreCase = true)) {
+                section = "BODY"
+                lastHeader = ""
+                continue
+            }
+
+            if (section == "HEADER") {
                 val lower = line.lowercase()
                 when {
                     lower.startsWith("from:") -> {
@@ -575,7 +592,7 @@ class GmailSmtpManager(context: Context) {
                         lastHeader = "to"
                     }
                     lower.startsWith("subject:") -> {
-                        subject = decodeMimeWords(line.substringAfter(":").trim())
+                        subject = line.substringAfter(":").trim()
                         lastHeader = "subject"
                     }
                     lower.startsWith("date:") -> {
@@ -588,90 +605,216 @@ class GmailSmtpManager(context: Context) {
                     }
                     line.startsWith(" ") || line.startsWith("\t") -> {
                         when (lastHeader) {
-                            "subject" -> subject = (subject + " " + decodeMimeWords(line.trim())).trim()
-                            "from" -> from = (from + " " + line.trim()).trim()
-                            "to" -> to = (to + " " + line.trim()).trim()
+                            "subject" -> subject = "$subject ${line.trim()}".trim()
+                            "from" -> from = "$from ${line.trim()}".trim()
+                            "to" -> to = "$to ${line.trim()}".trim()
                         }
                     }
-                    line.isBlank() || line.contains("BODY[TEXT]", ignoreCase = true) -> {
-                        inBody = true
+                    trimmed.isBlank() -> {
+                        section = "BODY"
                     }
                 }
             } else {
-                val trimmed = line.trim()
-                if (trimmed.equals("Content-Transfer-Encoding: base64", ignoreCase = true)) {
-                    sawBase64Encoding = true
+                if (trimmed == ")" || trimmed.startsWith("UID ", ignoreCase = true)) {
                     continue
                 }
-                if (trimmed == ")" || trimmed.startsWith("BODY[") || trimmed.startsWith("--") ||
-                    trimmed.startsWith("Content-", ignoreCase = true) ||
-                    trimmed.startsWith("UID ", ignoreCase = true)
-                ) {
-                    if (trimmed.startsWith("--") && base64Lines.isNotEmpty()) {
-                        // Finished first MIME part
-                        sawBase64Encoding = false
-                    }
-                    continue
-                }
-                if (sawBase64Encoding && trimmed.matches(Regex("^[A-Za-z0-9+/=]{12,}$"))) {
-                    base64Lines += trimmed
-                    continue
-                }
-                val cleaned = trimmed
-                    .replace(Regex("<[^>]+>"), " ")
-                    .replace("&nbsp;", " ")
-                    .replace("&amp;", "&")
-                    .replace("=20", " ")
-                    .trim()
-                if (cleaned.isNotBlank() && !cleaned.matches(Regex("^[A-Za-z0-9+/=]{36,}$"))) {
-                    snippetLines += cleaned
-                }
+                rawBodyLines += line
             }
         }
 
-        if (subject.isBlank() && from.isBlank() && to.isBlank()) return null
+        val decodedSubject = decodeMimeWords(subject)
+        val decodedFrom = decodeMimeWords(from)
+        val decodedTo = decodeMimeWords(to)
 
-        val decodedBase64Snippet = if (base64Lines.isNotEmpty() && snippetLines.isEmpty()) {
-            val joined = base64Lines.joinToString("")
-            val validLen = joined.length - (joined.length % 4)
-            if (validLen >= 8) {
-                runCatching {
-                    val bytes = Base64.decode(joined.substring(0, validLen), Base64.DEFAULT)
-                    String(bytes, Charsets.UTF_8)
-                        .replace(Regex("<[^>]+>"), " ")
-                        .replace(Regex("\\s+"), " ")
-                        .trim()
-                }.getOrDefault("")
-            } else ""
-        } else ""
+        if (decodedSubject.isBlank() && decodedFrom.isBlank() && decodedTo.isBlank()) return null
 
-        val finalSnippet = when {
-            snippetLines.isNotEmpty() -> snippetLines.joinToString(" ").replace(Regex("\\s+"), " ").take(240)
-            decodedBase64Snippet.isNotBlank() -> decodedBase64Snippet.take(240)
-            else -> "(Open in Gmail for attachment/HTML content)"
-        }
+        val readableBody = extractReadableTextFromMimeLines(rawBodyLines)
+        val snippet = readableBody
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(240)
+            .ifBlank { "(Open email for content)" }
 
         return EmailMessage(
             uid = stableId,
             folder = folder,
-            from = decodeMimeWords(from).ifBlank { "Unknown" },
-            to = decodeMimeWords(to),
-            subject = subject.ifBlank { "(No Subject)" },
+            from = decodedFrom.ifBlank { "Unknown" },
+            to = decodedTo,
+            subject = decodedSubject.ifBlank { "(No Subject)" },
             date = date,
-            snippet = finalSnippet,
+            snippet = snippet,
             messageId = messageId,
             imapUid = realImapUid,
-            folderPath = folderPath
+            folderPath = folderPath,
+            fullBody = readableBody.ifBlank { snippet }
         )
+    }
+
+    private fun extractReadableTextFromMimeLines(rawLines: List<String>): String {
+        if (rawLines.isEmpty()) return ""
+        val plainLines = mutableListOf<String>()
+        val plainBase64Chunks = mutableListOf<String>()
+        val htmlFallbackLines = mutableListOf<String>()
+        val htmlBase64Chunks = mutableListOf<String>()
+
+        var currentMimeType = "text/plain"
+        var currentEncoding = "7bit"
+        var inPartHeaders = false
+
+        for (rawLine in rawLines) {
+            val trimmed = rawLine.trim()
+            if (trimmed.startsWith("--") &&
+                trimmed.length >= 6 &&
+                !trimmed.contains(" ") &&
+                trimmed.drop(2).any { it.isLetterOrDigit() }
+            ) {
+                inPartHeaders = true
+                currentMimeType = "text/plain"
+                currentEncoding = "7bit"
+                continue
+            }
+            if (trimmed.startsWith("Content-Type:", ignoreCase = true)) {
+                inPartHeaders = true
+                currentMimeType = trimmed.substringAfter(":").substringBefore(";").trim().lowercase()
+                continue
+            }
+            if (trimmed.startsWith("Content-Transfer-Encoding:", ignoreCase = true)) {
+                inPartHeaders = true
+                currentEncoding = trimmed.substringAfter(":").trim().lowercase()
+                continue
+            }
+            if (trimmed.startsWith("Content-Disposition:", ignoreCase = true) ||
+                trimmed.startsWith("Content-ID:", ignoreCase = true) ||
+                trimmed.startsWith("X-Attachment", ignoreCase = true)
+            ) {
+                inPartHeaders = true
+                continue
+            }
+            if (inPartHeaders) {
+                if (trimmed.isBlank()) {
+                    inPartHeaders = false
+                }
+                continue
+            }
+
+            if (currentMimeType.startsWith("application/") || currentMimeType.startsWith("image/")) {
+                continue
+            }
+
+            if (currentEncoding == "base64") {
+                if (trimmed.matches(Regex("^[A-Za-z0-9+/=]{8,}$"))) {
+                    if (currentMimeType == "text/html") {
+                        htmlBase64Chunks += trimmed
+                    } else {
+                        plainBase64Chunks += trimmed
+                    }
+                }
+                continue
+            }
+
+            if (currentMimeType == "text/html") {
+                htmlFallbackLines += rawLine
+            } else {
+                plainLines += rawLine
+            }
+        }
+
+        if (plainLines.isNotEmpty()) {
+            val rawPlain = plainLines.joinToString("\n")
+            val decoded = if (currentEncoding == "quoted-printable" || rawPlain.contains("=0A") || rawPlain.contains("=\n")) {
+                decodeQuotedPrintable(rawPlain)
+            } else {
+                rawPlain
+            }
+            val cleaned = cleanEmailBodyText(decoded)
+            if (cleaned.isNotBlank()) return cleaned.take(3500)
+        }
+
+        if (plainBase64Chunks.isNotEmpty()) {
+            val joined = plainBase64Chunks.joinToString("")
+            val validLen = joined.length - (joined.length % 4)
+            if (validLen >= 8) {
+                val decoded = runCatching {
+                    val bytes = Base64.decode(joined.substring(0, validLen), Base64.DEFAULT)
+                    cleanEmailBodyText(String(bytes, Charsets.UTF_8))
+                }.getOrDefault("")
+                if (decoded.isNotBlank()) return decoded.take(3500)
+            }
+        }
+
+        if (htmlFallbackLines.isNotEmpty()) {
+            val rawHtml = decodeQuotedPrintable(htmlFallbackLines.joinToString("\n"))
+            val cleaned = cleanEmailBodyText(rawHtml)
+            if (cleaned.isNotBlank()) return cleaned.take(3500)
+        }
+
+        if (htmlBase64Chunks.isNotEmpty()) {
+            val joined = htmlBase64Chunks.joinToString("")
+            val validLen = joined.length - (joined.length % 4)
+            if (validLen >= 8) {
+                val decoded = runCatching {
+                    val bytes = Base64.decode(joined.substring(0, validLen), Base64.DEFAULT)
+                    cleanEmailBodyText(String(bytes, Charsets.UTF_8))
+                }.getOrDefault("")
+                if (decoded.isNotBlank()) return decoded.take(3500)
+            }
+        }
+
+        return ""
+    }
+
+    private fun cleanEmailBodyText(raw: String): String {
+        return raw
+            .replace(Regex("(?is)<style[^>]*>[\\s\\S]*?</style>"), " ")
+            .replace(Regex("(?is)<script[^>]*>[\\s\\S]*?</script>"), " ")
+            .replace(Regex("(?i)<br\\s*/?>"), "\n")
+            .replace(Regex("(?i)</(p|div|tr|li|h[1-6])>"), "\n")
+            .replace(Regex("<[^>]+>"), " ")
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace(Regex("[ \\t]+"), " ")
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .trim()
+    }
+
+    private fun decodeQuotedPrintable(input: String): String {
+        val softUnwrapped = input.replace(Regex("=\\r?\\n"), "")
+        val out = ByteArrayOutputStream(softUnwrapped.length)
+        var i = 0
+        while (i < softUnwrapped.length) {
+            val ch = softUnwrapped[i]
+            if (ch == '=' && i + 2 < softUnwrapped.length) {
+                val hex = softUnwrapped.substring(i + 1, i + 3)
+                val byteVal = hex.toIntOrNull(16)
+                if (byteVal != null) {
+                    out.write(byteVal)
+                    i += 3
+                    continue
+                }
+            }
+            out.write(softUnwrapped[i].toString().toByteArray(Charsets.UTF_8))
+            i++
+        }
+        return out.toString(Charsets.UTF_8.name())
     }
 
     private fun decodeMimeWords(input: String): String {
         if (!input.contains("=?")) return input
-        return Regex("=\\?[^?]+\\?[Bb]\\?([^?]+)\\?=").replace(input) { match ->
+        var result = Regex("=\\?[^?]+\\?[Bb]\\?([^?]+)\\?=").replace(input) { match ->
             runCatching {
                 String(Base64.decode(match.groupValues[1], Base64.DEFAULT), Charsets.UTF_8)
             }.getOrDefault(match.value)
         }
+        result = Regex("=\\?[^?]+\\?[Qq]\\?([^?]+)\\?=").replace(result) { match ->
+            runCatching {
+                decodeQuotedPrintable(match.groupValues[1].replace("_", " "))
+            }.getOrDefault(match.value)
+        }
+        return result
     }
 
     private fun openAuthenticatedSmtpSocket(

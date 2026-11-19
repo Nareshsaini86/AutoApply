@@ -162,7 +162,7 @@ fun GmailConnectSheet(
                     Text(
                         text = "Works instantly with any personal Gmail account without Google Workspace verification:\n" +
                             "1. Tap \"Open App Passwords\" below (requires 2-Step Verification on your Google Account).\n" +
-                            "2. Create an App Password named ApplyFlow and paste the 16-character password here.",
+                            "2. Create an App Password named 1Click Apply and paste the 16-character password here.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

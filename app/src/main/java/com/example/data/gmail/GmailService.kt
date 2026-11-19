@@ -250,7 +250,7 @@ class GmailService(
     suspend fun fetchRecentMessages(
         accessToken: String,
         mailbox: String = "INBOX",
-        maxResults: Int = 15
+        maxResults: Int = 25
     ): Result<List<EmailMessage>> = withContext(Dispatchers.IO) {
         try {
             val labelId = if (mailbox.equals("SENT", ignoreCase = true)) "SENT" else "INBOX"
@@ -272,7 +272,7 @@ class GmailService(
             val items = mutableListOf<EmailMessage>()
             for (id in messageIds) {
                 val msgReq = Request.Builder()
-                    .url("https://gmail.googleapis.com/gmail/v1/users/me/messages/$id?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID")
+                    .url("https://gmail.googleapis.com/gmail/v1/users/me/messages/$id?format=full")
                     .addHeader("Authorization", "Bearer $accessToken")
                     .get()
                     .build()
@@ -280,7 +280,8 @@ class GmailService(
                     if (!msgResp.isSuccessful) return@use
                     val json = JSONObject(msgResp.body?.string().orEmpty())
                     val snippet = json.optString("snippet", "")
-                    val headers = json.optJSONObject("payload")?.optJSONArray("headers")
+                    val payload = json.optJSONObject("payload")
+                    val headers = payload?.optJSONArray("headers")
                     var from = ""
                     var to = ""
                     var subject = ""
@@ -298,6 +299,9 @@ class GmailService(
                             }
                         }
                     }
+                    val extractedBody = payload?.let { extractTextFromPayload(it) }
+                        ?.take(3500)
+                        .orEmpty()
                     items += EmailMessage(
                         uid = id,
                         folder = mailbox.uppercase(),
@@ -305,8 +309,9 @@ class GmailService(
                         to = to,
                         subject = subject.ifBlank { "(No Subject)" },
                         date = date,
-                        snippet = snippet,
-                        messageId = msgId
+                        snippet = snippet.ifBlank { extractedBody.replace(Regex("\\s+"), " ").take(240) },
+                        messageId = msgId,
+                        fullBody = extractedBody.ifBlank { snippet }
                     )
                 }
             }
@@ -316,6 +321,52 @@ class GmailService(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    private fun extractTextFromPayload(payload: JSONObject): String {
+        val plainResults = mutableListOf<String>()
+        val htmlResults = mutableListOf<String>()
+
+        fun walk(node: JSONObject) {
+            val mime = node.optString("mimeType").lowercase()
+            val bodyData = node.optJSONObject("body")?.optString("data").orEmpty()
+            if (bodyData.isNotBlank()) {
+                val decoded = runCatching {
+                    String(Base64.decode(bodyData, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
+                }.getOrDefault("")
+                if (decoded.isNotBlank()) {
+                    when {
+                        mime == "text/plain" -> plainResults += decoded
+                        mime == "text/html" -> htmlResults += decoded
+                    }
+                }
+            }
+            val parts = node.optJSONArray("parts")
+            if (parts != null) {
+                for (i in 0 until parts.length()) {
+                    parts.optJSONObject(i)?.let { walk(it) }
+                }
+            }
+        }
+
+        walk(payload)
+        if (plainResults.isNotEmpty()) {
+            return plainResults.joinToString("\n\n").replace(Regex("\\n{3,}"), "\n\n").trim()
+        }
+        if (htmlResults.isNotEmpty()) {
+            return htmlResults.joinToString("\n")
+                .replace(Regex("(?is)<style[^>]*>[\\s\\S]*?</style>"), " ")
+                .replace(Regex("(?is)<script[^>]*>[\\s\\S]*?</script>"), " ")
+                .replace(Regex("(?i)<br\\s*/?>"), "\n")
+                .replace(Regex("(?i)</(p|div|tr|li|h[1-6])>"), "\n")
+                .replace(Regex("<[^>]+>"), " ")
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replace(Regex("[ \\t]+"), " ")
+                .replace(Regex("\\n{3,}"), "\n\n")
+                .trim()
+        }
+        return ""
     }
 
     suspend fun trashMessages(

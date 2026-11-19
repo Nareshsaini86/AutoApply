@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
@@ -63,17 +64,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.data.model.CandidateProfile
 import com.example.data.model.CapturedLinkedInPost
 import com.example.data.model.JobApplication
 
 private const val LINKEDIN_FEED_URL = "https://www.linkedin.com/feed/"
-private const val LINKEDIN_DOTNET_SEARCH_URL =
-    "https://www.linkedin.com/search/results/content/?keywords=.net%20developer%20hiring%20email"
-private const val LINKEDIN_JOBS_URL = "https://www.linkedin.com/jobs/"
+private const val LINKEDIN_JOBS_BASE_URL = "https://www.linkedin.com/jobs/"
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun LinkedInScreen(
+    profile: CandidateProfile?,
     capturedPost: CapturedLinkedInPost?,
     duplicateMatches: List<JobApplication>,
     isSending: Boolean,
@@ -88,6 +89,20 @@ fun LinkedInScreen(
     var loadProgress by remember { mutableIntStateOf(0) }
     var currentUrl by remember { mutableStateOf(LINKEDIN_FEED_URL) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val resumeRoleQuery = remember(profile?.preferredSearchQuery, profile?.currentRole, profile?.skillsSummary) {
+        deriveLinkedInRoleQuery(profile)
+    }
+    val hiringSearchUrl = remember(resumeRoleQuery) {
+        val kw = if (resumeRoleQuery.isNotBlank()) "$resumeRoleQuery hiring email" else "hiring email"
+        "https://www.linkedin.com/search/results/content/?keywords=${Uri.encode(kw)}"
+    }
+    val jobsSearchUrl = remember(resumeRoleQuery) {
+        if (resumeRoleQuery.isNotBlank()) {
+            "https://www.linkedin.com/jobs/search/?keywords=${Uri.encode(resumeRoleQuery)}"
+        } else {
+            LINKEDIN_JOBS_BASE_URL
+        }
+    }
 
     BackHandler(enabled = canGoBack) {
         webViewRef?.goBack()
@@ -157,7 +172,11 @@ fun LinkedInScreen(
                             maxLines = 1
                         )
                         Text(
-                            text = "Tap any hiring post to extract email & CV",
+                            text = if (resumeRoleQuery.isNotBlank()) {
+                                "Resume match: $resumeRoleQuery • Tap post"
+                            } else {
+                                "Tap any hiring post to extract email & CV"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -196,12 +215,21 @@ fun LinkedInScreen(
                         label = { Text("Feed") }
                     )
                     AssistChip(
-                        onClick = { webViewRef?.loadUrl(LINKEDIN_DOTNET_SEARCH_URL) },
-                        label = { Text(".NET Hiring Posts") }
+                        onClick = { webViewRef?.loadUrl(hiringSearchUrl) },
+                        label = {
+                            Text(
+                                if (resumeRoleQuery.isNotBlank()) "Hiring: $resumeRoleQuery" else "Hiring Posts"
+                            )
+                        },
+                        modifier = Modifier.testTag("linkedin_resume_hiring_chip")
                     )
                     AssistChip(
-                        onClick = { webViewRef?.loadUrl(LINKEDIN_JOBS_URL) },
-                        label = { Text("LinkedIn Jobs") }
+                        onClick = { webViewRef?.loadUrl(jobsSearchUrl) },
+                        label = {
+                            Text(
+                                if (resumeRoleQuery.isNotBlank()) "Jobs: $resumeRoleQuery" else "LinkedIn Jobs"
+                            )
+                        }
                     )
                 }
 
@@ -436,6 +464,28 @@ fun LinkedInScreen(
             }
         }
     }
+}
+
+internal fun deriveLinkedInRoleQuery(profile: CandidateProfile?): String {
+    if (profile == null) return ""
+    val explicit = profile.preferredSearchQuery.trim()
+    if (explicit.isNotBlank()) return explicit
+
+    val role = profile.currentRole
+        .replace(Regex("\\b(Sr\\.?|Senior|Junior|Jr\\.?|Lead|Intern)\\b", RegexOption.IGNORE_CASE), "")
+        .replace("(", "")
+        .replace(")", "")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+    if (role.isNotBlank()) {
+        return role.split(" ").take(3).joinToString(" ")
+    }
+
+    val topSkill = profile.skillsSummary.split(",")
+        .map { it.trim() }
+        .firstOrNull { it.isNotBlank() }
+        .orEmpty()
+    return topSkill
 }
 
 private const val INJECT_CLICK_LISTENER_JS = """

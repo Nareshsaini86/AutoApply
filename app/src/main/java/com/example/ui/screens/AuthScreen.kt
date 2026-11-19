@@ -117,7 +117,7 @@ fun AuthScreen(
                 ) {
                     Image(
                         painter = painterResource(id = R.drawable.applyflow_icon),
-                        contentDescription = "ApplyFlow app emblem",
+                        contentDescription = "1Click Apply app emblem",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .fillMaxSize()
@@ -126,12 +126,12 @@ fun AuthScreen(
                 }
                 Column {
                     Text(
-                        text = "ApplyFlow",
+                        text = "1Click Apply",
                         style = MaterialTheme.typography.displaySmall,
                         color = MaterialTheme.colorScheme.onBackground
                     )
                     Text(
-                        text = "LinkedIn Post -> Resume -> Gmail",
+                        text = "LinkedIn Jobs • Resume • Gmail",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -141,13 +141,13 @@ fun AuthScreen(
             Spacer(modifier = Modifier.height(24.dp))
 
             Text(
-                text = "Apply to .NET & Tech roles in seconds, never manually.",
+                text = "Apply to any job in seconds, effortlessly.",
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Paste any LinkedIn hiring post. AI extracts recruiter details, matches your Experience, CTC & Notice Period, attaches your PDF resume, checks for duplicates, and dispatches via Gmail.",
+                text = "Upload your resume once, tap or paste any LinkedIn hiring post, and send tailored emails with your CV via Gmail — automatically.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

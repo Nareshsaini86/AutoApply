@@ -83,6 +83,81 @@ class ResumeStorageManager(private val context: Context) {
         }
     }
 
+    /**
+     * Lightweight on-device PDF text extractor that inflates FlateDecode streams and reads
+     * standard PDF text operators so uploaded resumes can be parsed instantaneously offline.
+     */
+    fun extractReadableTextFromPdfBytes(pdfBytes: ByteArray): String {
+        val rawLatin = String(pdfBytes, Charsets.ISO_8859_1)
+        val collected = StringBuilder()
+
+        // 1. Decompress FlateDecode / compressed PDF streams
+        val streamRegex = Regex("stream\\r?\\n([\\s\\S]*?)\\r?\\n?endstream")
+        for (match in streamRegex.findAll(rawLatin)) {
+            val streamBytes = match.groupValues[1].toByteArray(Charsets.ISO_8859_1)
+            val decodedText = inflatePdfStream(streamBytes) ?: match.groupValues[1]
+            extractPdfTextOperators(decodedText, collected)
+        }
+
+        // 2. Also scan top-level uncompressed PDF literals as fallback
+        if (collected.length < 60) {
+            extractPdfTextOperators(rawLatin, collected)
+        }
+
+        return collected.toString()
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(12_000)
+    }
+
+    private fun inflatePdfStream(compressed: ByteArray): String? {
+        val offsets = intArrayOf(0, 1, 2)
+        for (offset in offsets) {
+            if (compressed.size <= offset) continue
+            val attempt = runCatching {
+                val inflater = java.util.zip.Inflater()
+                try {
+                    inflater.setInput(compressed, offset, compressed.size - offset)
+                    val out = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(4096)
+                    while (!inflater.finished()) {
+                        val n = inflater.inflate(buf)
+                        if (n == 0) {
+                            if (inflater.needsInput() || inflater.needsDictionary()) break
+                        } else {
+                            out.write(buf, 0, n)
+                        }
+                        if (out.size() > 512 * 1024) break
+                    }
+                    out.toString(Charsets.ISO_8859_1.name())
+                } finally {
+                    inflater.end()
+                }
+            }.getOrNull()
+            if (!attempt.isNullOrBlank() && (attempt.contains("Tj") || attempt.contains("TJ") || attempt.contains("BT"))) {
+                return attempt
+            }
+        }
+        return null
+    }
+
+    private fun extractPdfTextOperators(content: String, out: StringBuilder) {
+        val literalRegex = Regex("\\(([^()\\\\]*(?:\\\\.[^()\\\\]*)*)\\)")
+        for (m in literalRegex.findAll(content)) {
+            val rawToken = m.groupValues[1]
+                .replace("\\n", " ")
+                .replace("\\r", " ")
+                .replace("\\t", " ")
+                .replace("\\(", "(")
+                .replace("\\)", ")")
+                .replace("\\\\", "\\")
+            val printable = rawToken.filter { it.code in 32..126 || it == '\n' }.trim()
+            if (printable.isNotBlank() && printable.any { it.isLetterOrDigit() }) {
+                out.append(printable).append(' ')
+            }
+        }
+    }
+
     companion object {
         const val BUNDLED_RESUME_NAME = "NareshSaini_Resume.pdf"
         private const val CUSTOM_RESUME_FILE = "custom_resume.pdf"

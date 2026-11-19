@@ -2,13 +2,17 @@ package com.example.data.ai
 
 import android.util.Log
 import com.example.data.gmail.EmailTemplateFormatter
+import com.example.data.model.AutoReplyDraft
 import com.example.data.model.CandidateProfile
+import com.example.data.model.EmailMessage
 import com.example.data.model.FollowUpDraft
 import com.example.data.model.JobApplication
 import com.example.data.model.ParsedJobDraft
+import com.example.data.model.ResumeInsights
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
+import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeout
@@ -40,6 +44,18 @@ class JobAiRepository {
         )
     )
 
+    private val resumeInsightsSchema = Schema.obj(
+        properties = mapOf(
+            "targetRole" to Schema.string(description = "Primary job role the candidate is suited for based on the resume (e.g. Java Developer, Digital Marketing Manager, UI/UX Designer, .NET Full Stack Developer, HR Recruiter)."),
+            "preferredSearchQuery" to Schema.string(description = "Concise 2-3 word LinkedIn search query for hiring posts matching this resume (e.g. 'Java Developer', '.NET Full Stack', 'UI UX Designer', 'Digital Marketing')."),
+            "skillsSummary" to Schema.string(description = "Comma-separated top 8-12 skills found in the resume."),
+            "totalExperience" to Schema.string(description = "Total years of experience found in resume (e.g. '3+ Years', 'Fresher', '5+ Years')."),
+            "resumeSummary" to Schema.string(description = "Concise 2-sentence professional summary based strictly on this resume."),
+            "phone" to Schema.string(description = "Phone number found in resume or empty string."),
+            "linkedinUrl" to Schema.string(description = "LinkedIn URL found in resume or empty string.")
+        )
+    )
+
     private val fastParseModel by lazy {
         Firebase.ai.generativeModel(
             modelName = "gemini-3.5-flash-lite",
@@ -58,6 +74,148 @@ class JobAiRepository {
                 responseSchema = followUpSchema
             }
         )
+    }
+
+    private val autoReplySchema = Schema.obj(
+        properties = mapOf(
+            "subject" to Schema.string(description = "Reply email subject line starting with Re: and keeping original thread subject."),
+            "body" to Schema.string(description = "Cleanly formatted reply answering every question or requirement asked in the recruiter's email using candidate's profile."),
+            "detectedRequirements" to Schema.array(
+                items = Schema.string(),
+                description = "Short labels for each question/requirement detected in the incoming email (e.g. Current CTC, Expected CTC, Notice Period, Interview Slot, Updated CV)."
+            ),
+            "attachResume" to Schema.boolean(description = "True if attaching the candidate's PDF resume/CV is helpful or requested.")
+        )
+    )
+
+    private val resumeReaderModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = resumeInsightsSchema
+            }
+        )
+    }
+
+    private val fastAutoReplyModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = autoReplySchema
+            }
+        )
+    }
+
+    /**
+     * Reads an uploaded resume locally in <10ms across software, design, marketing, HR,
+     * finance, sales, and operations fields so LinkedIn job discovery adapts immediately.
+     */
+    fun extractResumeInsightsLocally(
+        fileName: String,
+        extractedPdfText: String,
+        fallbackProfile: CandidateProfile
+    ): ResumeInsights {
+        val corpus = "$fileName $extractedPdfText"
+        val lowerCorpus = corpus.lowercase()
+        val detectedSkills = detectDomainSkills(lowerCorpus)
+
+        val inferredRole = inferPrimaryRoleFromResume(lowerCorpus, detectedSkills)
+            .ifBlank { fallbackProfile.currentRole.ifBlank { "Software / Professional" } }
+
+        val searchQuery = deriveConciseSearchQuery(inferredRole, detectedSkills)
+
+        val expMatch = Regex("\\b(\\d{1,2})\\s*\\+?\\s*(?:years?|yrs?)\\b", RegexOption.IGNORE_CASE)
+            .find(extractedPdfText)
+        val totalExp = when {
+            expMatch != null -> "${expMatch.groupValues[1]}+ Years"
+            lowerCorpus.contains("fresher") || lowerCorpus.contains("entry level") -> "Fresher"
+            else -> fallbackProfile.totalExperience.ifBlank { "1+ Years" }
+        }
+
+        val phoneMatch = Regex("(?:\\+?\\d{1,3}[\\s-]?)?\\d{10}").find(extractedPdfText)
+        val linkedinMatch = Regex("https?://(?:www\\.)?linkedin\\.com/in/[A-Za-z0-9_-]+/?", RegexOption.IGNORE_CASE)
+            .find(extractedPdfText)
+
+        val skillsText = if (detectedSkills.isNotEmpty()) {
+            detectedSkills.joinToString(", ")
+        } else {
+            fallbackProfile.skillsSummary
+        }
+
+        val summaryText = if (extractedPdfText.length > 40) {
+            "$inferredRole with $totalExp experience" +
+                (if (detectedSkills.isNotEmpty()) " specializing in ${detectedSkills.take(5).joinToString(", ")}." else ".")
+        } else {
+            fallbackProfile.resumeSummary
+        }
+
+        return ResumeInsights(
+            targetRole = inferredRole,
+            preferredSearchQuery = searchQuery,
+            skillsSummary = skillsText,
+            totalExperience = totalExp,
+            resumeSummary = summaryText,
+            phone = phoneMatch?.value?.trim() ?: fallbackProfile.phone,
+            linkedinUrl = linkedinMatch?.value?.trim() ?: fallbackProfile.linkedinUrl
+        )
+    }
+
+    suspend fun analyzeResumePdfWithGemini(
+        fileName: String,
+        pdfBytes: ByteArray,
+        extractedText: String
+    ): Result<ResumeInsights> {
+        return try {
+            val promptInstruction = """
+                Analyze this candidate resume ($fileName) and identify the exact job roles and LinkedIn search keywords they should target.
+                Return concise, accurate fields for ANY industry (IT, Tech, Marketing, HR, Finance, Sales, Design, Operations, etc.).
+                ${if (extractedText.length >= 60) "\nExtracted text snippet:\n${extractedText.take(4000)}" else ""}
+            """.trimIndent()
+
+            val response = withTimeout(15_000L) {
+                if (pdfBytes.size in 1..(4 * 1024 * 1024)) {
+                    resumeReaderModel.generateContent(
+                        content {
+                            inlineData(pdfBytes, "application/pdf")
+                            text(promptInstruction)
+                        }
+                    )
+                } else {
+                    resumeReaderModel.generateContent(promptInstruction)
+                }
+            }
+            val jsonStr = response.text
+            if (jsonStr.isNullOrBlank()) {
+                Result.failure(IllegalStateException("Empty resume analysis"))
+            } else {
+                val json = JSONObject(jsonStr)
+                val targetRole = json.optString("targetRole").trim()
+                val query = json.optString("preferredSearchQuery").trim()
+                    .ifBlank { deriveConciseSearchQuery(targetRole, emptyList()) }
+                if (targetRole.isBlank() && query.isBlank()) {
+                    Result.failure(IllegalStateException("Could not infer role from resume"))
+                } else {
+                    Result.success(
+                        ResumeInsights(
+                            targetRole = targetRole,
+                            preferredSearchQuery = query,
+                            skillsSummary = json.optString("skillsSummary").trim(),
+                            totalExperience = json.optString("totalExperience").trim(),
+                            resumeSummary = json.optString("resumeSummary").trim(),
+                            phone = json.optString("phone").trim(),
+                            linkedinUrl = json.optString("linkedinUrl").trim()
+                        )
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Gemini PDF resume analysis fell back locally: ${e.message}")
+            Result.failure(e)
+        }
     }
 
     /**
@@ -138,6 +296,238 @@ class JobAiRepository {
         return Result.success(FollowUpDraft(subject = subject, body = body))
     }
 
+    /**
+     * Instant (<5ms) Inbox reply auto-filler: detects every question/requirement
+     * the recruiter asked in their incoming email or reply and pre-fills answers
+     * from the candidate's profile so the user can review and send in 1 click.
+     */
+    fun extractAutoReplyLocally(
+        email: EmailMessage,
+        profile: CandidateProfile,
+        trackedApps: List<JobApplication> = emptyList()
+    ): AutoReplyDraft {
+        val rawSenderHeader = if (email.folder.equals("SENT", ignoreCase = true)) email.to else email.from
+        val senderEmail = EMAIL_REGEX.find(rawSenderHeader)?.value?.trim()?.lowercase().orEmpty()
+
+        val displayNameFromHeader = rawSenderHeader
+            .substringBefore("<")
+            .replace("\"", "")
+            .trim()
+            .takeIf { it.isNotBlank() && !it.contains("@") }
+        val senderName = displayNameFromHeader ?: if (senderEmail.contains("@")) {
+            val local = senderEmail.substringBefore("@")
+            if (local !in GENERIC_EMAIL_LOCAL_PARTS) {
+                local.split(".", "_", "-")
+                    .filter { it.length > 1 && it.all(Char::isLetter) }
+                    .joinToString(" ") { part -> part.replaceFirstChar { c -> c.uppercase() } }
+            } else ""
+        } else ""
+
+        val matchedApp = trackedApps.firstOrNull { app ->
+            (senderEmail.isNotBlank() && app.recruiterEmail.equals(senderEmail, ignoreCase = true)) ||
+                (app.emailSubject.isNotBlank() && email.subject.contains(app.emailSubject.take(24), ignoreCase = true))
+        }
+
+        val emailBodyText = email.fullBody.ifBlank { email.snippet }
+        val corpus = "${email.subject}\n$emailBodyText"
+        val lower = corpus.lowercase()
+
+        val detectedRequirements = mutableListOf<String>()
+        val answerRows = mutableListOf<Pair<String, String>>()
+
+        fun addReq(label: String, value: String) {
+            if (label !in detectedRequirements) detectedRequirements += label
+            if (answerRows.none { it.first == label }) answerRows += label to value
+        }
+
+        if (lower.contains("experience") || lower.contains("years of exp") || Regex("\\brelevant exp|\\bexp\\b").containsMatchIn(lower)) {
+            addReq("Total Experience", profile.totalExperience.ifBlank { "5+ Years" })
+        }
+        if (lower.contains("current ctc") || lower.contains("cctc") || lower.contains("current salary") || lower.contains("current package") || lower.contains("current compensation")) {
+            addReq("Current CTC", profile.currentCtc.ifBlank { "Negotiable (will share on call)" })
+        }
+        if (lower.contains("expected ctc") || lower.contains("ectc") || lower.contains("expected salary") || lower.contains("expected package") || lower.contains("salary expectation") || lower.contains("ctc")) {
+            if (answerRows.none { it.first == "Current CTC" } && lower.contains("ctc") && !lower.contains("expected")) {
+                addReq("Current CTC", profile.currentCtc.ifBlank { "Negotiable (will share on call)" })
+            }
+            addReq("Expected CTC", profile.expectedCtc.ifBlank { "Open to market standards" })
+        }
+        if (lower.contains("notice") || lower.contains("immediate") || lower.contains("joining") || lower.contains("how soon") || lower.contains("lwd") || Regex("\\bnp\\b").containsMatchIn(lower)) {
+            addReq(
+                "Notice Period",
+                buildNoticeAnswer(profile.noticePeriod, asksImmediate = lower.contains("immediate"))
+            )
+        }
+        if (lower.contains("location") || lower.contains("relocat") || lower.contains("city") || lower.contains("hybrid") || lower.contains("onsite") || lower.contains("work from office")) {
+            addReq("Current Location", profile.currentLocation.ifBlank { "India" } + " (Open to relocate / Hybrid / Onsite)")
+        }
+        if (lower.contains("interview") || lower.contains("availability") || lower.contains("available") || lower.contains("schedule") || lower.contains("slot") || lower.contains("time to connect") || lower.contains("call")) {
+            addReq("Interview Availability", "Available this week (Mon–Fri, flexible slots as per your convenience)")
+        }
+        if (lower.contains("reason for change") || lower.contains("why are you looking") || lower.contains("looking for a change")) {
+            addReq("Reason for Change", "Seeking high-impact growth & challenging opportunities aligned with my experience")
+        }
+        val mentionedSkills = detectDomainSkills(lower)
+        if (mentionedSkills.isNotEmpty() || lower.contains("skill") || lower.contains("tech stack") || lower.contains("requirement")) {
+            val skillsAnswer = if (mentionedSkills.isNotEmpty()) {
+                mentionedSkills.joinToString(", ")
+            } else {
+                profile.skillsSummary
+            }
+            addReq("Key Skills Match", skillsAnswer)
+        }
+        val asksResume = lower.contains("resume") || lower.contains("cv") || lower.contains("updated profile") || lower.contains("attach")
+        if (asksResume) {
+            detectedRequirements += "Updated CV"
+        }
+
+        // Fallback so every email always has helpful candidate details pre-filled
+        if (answerRows.isEmpty()) {
+            answerRows += "Current Role" to profile.currentRole.ifBlank { "Experienced Professional" }
+            answerRows += "Total Experience" to profile.totalExperience.ifBlank { "5+ Years" }
+            if (profile.currentCtc.isNotBlank()) answerRows += "Current CTC" to profile.currentCtc
+            if (profile.expectedCtc.isNotBlank()) answerRows += "Expected CTC" to profile.expectedCtc
+            answerRows += "Notice Period" to profile.noticePeriod.ifBlank { "30 Days" }
+            answerRows += "Current Location" to profile.currentLocation.ifBlank { "India" }
+        }
+
+        val greeting = if (senderName.isNotBlank()) {
+            "Dear ${senderName.substringBefore(" ")},"
+        } else {
+            "Dear Hiring Team,"
+        }
+
+        val reSubject = if (email.subject.startsWith("Re:", ignoreCase = true)) {
+            email.subject
+        } else {
+            "Re: ${email.subject}"
+        }
+
+        val roleContext = matchedApp?.jobTitle?.takeIf { it.isNotBlank() }
+            ?: profile.currentRole.ifBlank { "this opportunity" }
+        val introLine = if (matchedApp != null) {
+            "Thank you for reaching out regarding my application for the $roleContext role at ${matchedApp.companyName}."
+        } else {
+            "Thank you for your email and for considering my profile for $roleContext."
+        }
+
+        val attachCv = asksResume || matchedApp != null || detectedRequirements.isNotEmpty()
+        val body = buildString {
+            appendLine(greeting)
+            appendLine()
+            appendLine(introLine)
+            appendLine()
+            appendLine("Please find below the requested details:")
+            answerRows.forEach { (label, value) ->
+                appendLine("• $label: $value")
+            }
+            if (profile.phone.isNotBlank()) appendLine("• Contact Number: ${profile.phone}")
+            if (profile.linkedinUrl.isNotBlank()) appendLine("• LinkedIn: ${profile.linkedinUrl}")
+            appendLine()
+            if (attachCv) {
+                appendLine("I have also attached my updated resume (${profile.resumeFileName}) for your quick reference. Please let me know a convenient time to connect for the next steps.")
+            } else {
+                appendLine("Please let me know if you need any additional information or a convenient time for a quick discussion.")
+            }
+            appendLine()
+            appendLine("Best regards,")
+            appendLine(profile.fullName)
+            if (profile.phone.isNotBlank()) appendLine(profile.phone)
+            if (profile.email.isNotBlank()) appendLine(profile.email)
+        }.trim()
+
+        return AutoReplyDraft(
+            toEmail = senderEmail,
+            subject = reSubject,
+            body = EmailTemplateFormatter.normalizePlainText(body),
+            detectedRequirements = detectedRequirements.distinct(),
+            attachResume = attachCv,
+            inReplyTo = email.messageId.takeIf { it.isNotBlank() }
+        )
+    }
+
+    suspend fun polishAutoReplyWithGemini(
+        email: EmailMessage,
+        profile: CandidateProfile,
+        matchedApp: JobApplication? = null
+    ): Result<AutoReplyDraft> {
+        val rawSenderHeader = if (email.folder.equals("SENT", ignoreCase = true)) email.to else email.from
+        val senderEmail = EMAIL_REGEX.find(rawSenderHeader)?.value?.trim()?.lowercase().orEmpty()
+        if (senderEmail.isBlank()) {
+            return Result.failure(IllegalArgumentException("No recipient email in message"))
+        }
+
+        return try {
+            val prompt = buildString {
+                appendLine("You are replying on behalf of a job candidate to a recruiter's email in their Inbox.")
+                appendLine("Read every question, requirement, or detail asked in the incoming email and write a crisp, polite, ready-to-send reply with all details clearly answered.")
+                appendLine()
+                appendLine("INCOMING EMAIL:")
+                appendLine("From: ${email.from}")
+                appendLine("Subject: ${email.subject}")
+                appendLine("Content:")
+                appendLine(email.fullBody.ifBlank { email.snippet }.take(2500))
+                appendLine()
+                if (matchedApp != null) {
+                    appendLine("MATCHED APPLICATION CONTEXT: Role=${matchedApp.jobTitle}, Company=${matchedApp.companyName}")
+                }
+                appendLine("CANDIDATE PROFILE:")
+                appendLine("- Name: ${profile.fullName}")
+                appendLine("- Role: ${profile.currentRole}")
+                appendLine("- Experience: ${profile.totalExperience}")
+                appendLine("- Current CTC: ${profile.currentCtc.ifBlank { "Negotiable (discuss on call)" }}")
+                appendLine("- Expected CTC: ${profile.expectedCtc.ifBlank { "Open to market standards" }}")
+                appendLine("- Notice Period: ${profile.noticePeriod.ifBlank { "30 Days" }}")
+                appendLine("- Current Location: ${profile.currentLocation}")
+                appendLine("- Skills: ${profile.skillsSummary}")
+                appendLine("- Phone: ${profile.phone}")
+                appendLine("- LinkedIn: ${profile.linkedinUrl}")
+                appendLine("- Attached CV File: ${profile.resumeFileName}")
+                appendLine()
+                appendLine("FORMATTING RULES:")
+                appendLine("- Use greeting on its own line, blank line, concise thank-you sentence, blank line, 'Please find below the requested details:' followed by '• Label: Value' lines, blank line, closing + resume note, blank line, 'Best regards,' + name/phone/email.")
+            }
+
+            val response = withTimeout(8_000L) {
+                fastAutoReplyModel.generateContent(prompt)
+            }
+            val jsonText = response.text ?: return Result.failure(IllegalStateException("Empty auto-reply response"))
+            val json = JSONObject(jsonText)
+            val reqsJson = json.optJSONArray("detectedRequirements")
+            val reqs = buildList {
+                if (reqsJson != null) {
+                    for (i in 0 until reqsJson.length()) {
+                        val item = reqsJson.optString(i).trim()
+                        if (item.isNotBlank()) add(item)
+                    }
+                }
+            }
+            val subject = json.optString("subject").trim().ifBlank {
+                if (email.subject.startsWith("Re:", ignoreCase = true)) email.subject else "Re: ${email.subject}"
+            }
+            val body = EmailTemplateFormatter.normalizePlainText(json.optString("body").trim())
+            if (body.isBlank()) {
+                Result.failure(IllegalStateException("Blank auto-reply body"))
+            } else {
+                Result.success(
+                    AutoReplyDraft(
+                        toEmail = senderEmail,
+                        subject = subject,
+                        body = body,
+                        detectedRequirements = reqs,
+                        attachResume = json.optBoolean("attachResume", true),
+                        inReplyTo = email.messageId.takeIf { it.isNotBlank() }
+                    )
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Auto-reply Gemini polish skipped: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
     private fun parseGeminiDraftJson(jsonText: String): ParsedJobDraft {
         val json = JSONObject(jsonText)
         val detailsJson = json.optJSONArray("requestedDetails")
@@ -198,7 +588,7 @@ class JobAiRepository {
         val lines = normalizedText.lines().map { it.trim() }.filter { it.isNotBlank() }
         val lowerPost = normalizedText.lowercase()
 
-        val detectedSkills = detectTechSkills(lowerPost)
+        val detectedSkills = detectDomainSkills(lowerPost)
         val jobTitle = extractJobTitle(lines, detectedSkills)
         val location = extractLocation(lines, lowerPost)
         val workMode = when {
@@ -291,7 +681,7 @@ class JobAiRepository {
             )
             appendLine()
             appendLine(
-                "With $expShort of hands-on experience in $skillHighlight, SQL Server, and enterprise REST APIs, I have led scalable backend and full-stack modules in production."
+                "With $expShort of hands-on experience in $skillHighlight, I have consistently delivered impactful work and am ready to contribute from day one."
             )
             appendLine()
             appendLine("Candidate Details (as requested):")
@@ -333,7 +723,7 @@ class JobAiRepository {
         }
     }
 
-    private fun detectTechSkills(lowerPost: String): List<String> {
+    private fun detectDomainSkills(lowerText: String): List<String> {
         val matches = mutableListOf<String>()
         val catalog = listOf(
             "asp.net core" to "ASP.NET Core",
@@ -345,21 +735,97 @@ class JobAiRepository {
             "mvc" to "ASP.NET MVC",
             "entityframework" to "Entity Framework",
             "entity framework" to "Entity Framework",
-            "sql" to "SQL Server",
+            "spring boot" to "Spring Boot",
+            "java" to "Java",
+            "python" to "Python",
+            "django" to "Django",
+            "fastapi" to "FastAPI",
             "react" to "React.js",
             "angular" to "Angular",
+            "node.js" to "Node.js",
+            "nodejs" to "Node.js",
+            "typescript" to "TypeScript",
+            "javascript" to "JavaScript",
+            "kotlin" to "Kotlin",
+            "android" to "Android",
+            "flutter" to "Flutter",
+            "swift" to "iOS / Swift",
+            "sql server" to "SQL Server",
+            "sql" to "SQL",
             "web api" to "REST APIs",
             "rest api" to "REST APIs",
             "azure" to "Azure",
             "aws" to "AWS",
-            "microservices" to "Microservices"
+            "docker" to "Docker",
+            "kubernetes" to "Kubernetes",
+            "devops" to "DevOps",
+            "microservices" to "Microservices",
+            "power bi" to "Power BI",
+            "tableau" to "Tableau",
+            "data analyst" to "Data Analysis",
+            "machine learning" to "Machine Learning",
+            "selenium" to "QA Automation",
+            "manual testing" to "QA Testing",
+            "figma" to "Figma",
+            "ui/ux" to "UI/UX Design",
+            "seo" to "SEO",
+            "digital marketing" to "Digital Marketing",
+            "social media" to "Social Media",
+            "talent acquisition" to "Talent Acquisition",
+            "recruitment" to "Recruitment",
+            "human resources" to "HR Management",
+            "accounting" to "Accounting",
+            "tally" to "Tally / GST",
+            "financial" to "Finance",
+            "business development" to "Business Development",
+            "sales" to "Sales",
+            "product management" to "Product Management"
         )
         for ((token, label) in catalog) {
-            if (lowerPost.contains(token) && label !in matches) {
+            if (lowerText.contains(token) && label !in matches) {
                 matches += label
             }
         }
         return matches
+    }
+
+    private fun inferPrimaryRoleFromResume(lowerCorpus: String, skills: List<String>): String {
+        return when {
+            skills.any { it.contains(".NET", ignoreCase = true) || it == "C#" } ->
+                if (skills.any { it.contains("React") || it.contains("Angular") }) ".NET Full Stack Developer" else ".NET Developer"
+            skills.any { it == "Java" || it == "Spring Boot" } -> "Java Backend Developer"
+            skills.any { it == "Android" || it == "Kotlin" } -> "Android Developer"
+            skills.any { it == "Flutter" } -> "Flutter Developer"
+            skills.any { it == "Python" || it == "Django" || it == "FastAPI" } -> "Python Developer"
+            skills.any { it == "React.js" || it == "Angular" || it == "Node.js" } -> "Full Stack / Frontend Developer"
+            skills.any { it == "UI/UX Design" || it == "Figma" } -> "UI/UX Designer"
+            skills.any { it == "Data Analysis" || it == "Power BI" || it == "Tableau" } -> "Data Analyst"
+            skills.any { it == "Machine Learning" } -> "AI / ML Engineer"
+            skills.any { it == "DevOps" || it == "Kubernetes" || it == "Docker" } -> "DevOps Engineer"
+            skills.any { it == "QA Automation" || it == "QA Testing" } -> "QA / Software Tester"
+            skills.any { it == "Digital Marketing" || it == "SEO" } -> "Digital Marketing Specialist"
+            skills.any { it == "Talent Acquisition" || it == "Recruitment" || it == "HR Management" } -> "HR & Talent Acquisition"
+            skills.any { it == "Accounting" || it == "Tally / GST" || it == "Finance" } -> "Finance & Accounts Executive"
+            skills.any { it == "Business Development" || it == "Sales" } -> "Business Development / Sales"
+            skills.any { it == "Product Management" } -> "Product Manager"
+            lowerCorpus.contains("software") || lowerCorpus.contains("developer") -> "Software Developer"
+            else -> ""
+        }
+    }
+
+    private fun deriveConciseSearchQuery(role: String, skills: List<String>): String {
+        val cleanRole = role.replace(Regex("\\b(Sr\\.?|Senior|Junior|Jr\\.?|Lead|Intern)\\b", RegexOption.IGNORE_CASE), "")
+            .replace("(", "")
+            .replace(")", "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        return when {
+            cleanRole.contains(".NET", ignoreCase = true) -> ".NET Full Stack"
+            cleanRole.isNotBlank() && cleanRole.length <= 28 -> cleanRole
+            skills.isNotEmpty() -> skills.take(2).joinToString(" ")
+            cleanRole.isNotBlank() -> cleanRole.split(" ").take(3).joinToString(" ")
+            else -> ""
+        }
     }
 
     private fun extractJobTitle(lines: List<String>, detectedSkills: List<String>): String {
@@ -376,18 +842,18 @@ class JobAiRepository {
             if (candidate.length in 3..80) return candidate
         }
         val devLine = lines.firstOrNull {
-            (it.contains("developer", ignoreCase = true) || it.contains("engineer", ignoreCase = true)) && !it.contains("#")
+            (it.contains("developer", ignoreCase = true) ||
+                it.contains("engineer", ignoreCase = true) ||
+                it.contains("designer", ignoreCase = true) ||
+                it.contains("analyst", ignoreCase = true) ||
+                it.contains("manager", ignoreCase = true) ||
+                it.contains("executive", ignoreCase = true)) && !it.contains("#")
         }
         if (devLine != null && devLine.length <= 70) {
             return devLine.replace(Regex("^[^a-zA-Z0-9.]+"), "").trim()
         }
-        if (detectedSkills.any { it.contains(".NET", ignoreCase = true) || it == "C#" || it.contains("MVC") }) {
-            return ".NET Developer"
-        }
-        if (detectedSkills.any { it.contains("React", ignoreCase = true) }) {
-            return "React / Full Stack Developer"
-        }
-        return "Software Developer"
+        val inferred = inferPrimaryRoleFromResume("", detectedSkills)
+        return inferred.ifBlank { "Open Position" }
     }
 
     private fun extractLocation(lines: List<String>, lowerPost: String): String {
@@ -420,7 +886,7 @@ class JobAiRepository {
     }
 
     private fun buildParsePrompt(rawPost: String, profile: CandidateProfile): String = buildString {
-        appendLine("You are an expert technical career assistant. Parse the LinkedIn job post below and draft a cleanly formatted job application email.")
+        appendLine("You are an expert career & job application assistant. Parse the LinkedIn job post below and draft a cleanly formatted job application email.")
         appendLine()
         appendLine("LINKEDIN JOB POST:")
         appendLine(rawPost.trim())

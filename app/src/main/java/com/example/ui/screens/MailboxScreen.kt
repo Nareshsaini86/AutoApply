@@ -71,7 +71,13 @@ import androidx.compose.ui.unit.dp
 import com.example.data.model.EmailMessage
 import com.example.ui.viewmodel.MailboxUiState
 
-@OptIn(ExperimentalMaterial3Api::class)
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material3.LinearProgressIndicator
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MailboxScreen(
     mailbox: MailboxUiState,
@@ -87,6 +93,10 @@ fun MailboxScreen(
     onClearSelection: () -> Unit,
     onDeleteSelected: () -> Unit,
     onDeleteSingle: (EmailMessage) -> Unit,
+    onOpenMessage: (EmailMessage) -> Unit = {},
+    onCloseMessage: () -> Unit = {},
+    onUpdateAutoReply: (subject: String?, body: String?, attachResume: Boolean?) -> Unit = { _, _, _ -> },
+    onSendOneClickReply: (EmailMessage) -> Unit = {},
     onSendDirectEmail: (
         toEmail: String,
         subject: String,
@@ -183,7 +193,7 @@ fun MailboxScreen(
                     }
                     IconButton(
                         onClick = onRefresh,
-                        enabled = isGmailReady && !mailbox.isLoading && !mailbox.isDeleting,
+                        enabled = isGmailReady && !mailbox.isLoading && !mailbox.isRefreshing && !mailbox.isDeleting,
                         modifier = Modifier.testTag("mailbox_refresh_button")
                     ) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "Refresh emails")
@@ -364,6 +374,14 @@ fun MailboxScreen(
 
                 Spacer(Modifier.height(6.dp))
 
+                if (mailbox.isRefreshing) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 2.dp)
+                    )
+                }
+
                 if (mailbox.error != null) {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
@@ -439,6 +457,7 @@ fun MailboxScreen(
                                         onToggleSelection(msg.uid)
                                     } else {
                                         selectedMessage = msg
+                                        onOpenMessage(msg)
                                     }
                                 },
                                 onLongPress = {
@@ -452,12 +471,16 @@ fun MailboxScreen(
         }
     }
 
-    // Message Viewer Sheet
+    // Message Viewer Sheet with Auto-Filled 1-Click Reply
     val viewing = selectedMessage
     if (viewing != null) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val autoReply = mailbox.autoReplyDraft
         ModalBottomSheet(
-            onDismissRequest = { selectedMessage = null },
+            onDismissRequest = {
+                selectedMessage = null
+                onCloseMessage()
+            },
             sheetState = sheetState
         ) {
             Column(
@@ -492,45 +515,191 @@ fun MailboxScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = viewing.snippet,
+                        text = viewing.fullBody.ifBlank { viewing.snippet },
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(14.dp)
                     )
                 }
+
+                if (viewing.folder == "INBOX" && autoReply != null) {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                        ),
+                        border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                        shape = MaterialTheme.shapes.large,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("mailbox_auto_reply_card")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "Auto-Filled Reply (Ready in 1 Click)",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                if (mailbox.isPolishingReply) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                            }
+
+                            if (autoReply.detectedRequirements.isNotEmpty()) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    autoReply.detectedRequirements.forEach { reqLabel ->
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                                            shape = RoundedCornerShape(999.dp)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.CheckCircle,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                                Text(
+                                                    text = reqLabel,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            OutlinedTextField(
+                                value = autoReply.subject,
+                                onValueChange = { onUpdateAutoReply(it, null, null) },
+                                label = { Text("Reply Subject") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("mailbox_auto_reply_subject")
+                            )
+
+                            OutlinedTextField(
+                                value = autoReply.body,
+                                onValueChange = { onUpdateAutoReply(null, it, null) },
+                                label = { Text("Auto-Filled Answers & Message") },
+                                minLines = 5,
+                                maxLines = 10,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("mailbox_auto_reply_body")
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "Attach $activeResumeName",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Switch(
+                                    checked = autoReply.attachResume,
+                                    onCheckedChange = { onUpdateAutoReply(null, null, it) },
+                                    modifier = Modifier.testTag("mailbox_auto_reply_attach_switch")
+                                )
+                            }
+
+                            Button(
+                                onClick = {
+                                    onSendOneClickReply(viewing)
+                                    selectedMessage = null
+                                    onCloseMessage()
+                                },
+                                enabled = !mailbox.isSendingEmail && autoReply.toEmail.contains("@") && autoReply.body.isNotBlank(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(50.dp)
+                                    .testTag("mailbox_one_click_reply_button")
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Rounded.Send,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("1-Click Send Reply")
+                            }
+                        }
+                    }
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Button(
+                    OutlinedButton(
                         onClick = {
-                            val replyTarget = extractEmailAddress(
-                                if (viewing.folder == "SENT") viewing.to else viewing.from
-                            )
-                            val reSubject = if (viewing.subject.startsWith("Re:", ignoreCase = true)) {
-                                viewing.subject
-                            } else {
-                                "Re: ${viewing.subject}"
-                            }
+                            val replyTarget = autoReply?.toEmail?.takeIf { it.contains("@") }
+                                ?: extractEmailAddress(
+                                    if (viewing.folder == "SENT") viewing.to else viewing.from
+                                )
+                            val reSubject = autoReply?.subject
+                                ?: if (viewing.subject.startsWith("Re:", ignoreCase = true)) {
+                                    viewing.subject
+                                } else {
+                                    "Re: ${viewing.subject}"
+                                }
+                            val prefilledBody = autoReply?.body.orEmpty()
                             selectedMessage = null
+                            onCloseMessage()
                             openCompose(
                                 to = replyTarget,
                                 subject = reSubject,
-                                body = "",
+                                body = prefilledBody,
                                 inReplyTo = viewing.messageId.takeIf { it.isNotBlank() }
                             )
                         },
                         modifier = Modifier
                             .weight(1f)
                             .height(50.dp)
+                            .testTag("mailbox_full_compose_button")
                     ) {
                         Icon(Icons.AutoMirrored.Rounded.Reply, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Reply")
+                        Text("Full Compose")
                     }
                     OutlinedButton(
                         onClick = {
                             pendingSingleDelete = viewing
                             selectedMessage = null
+                            onCloseMessage()
                         },
                         colors = ButtonDefaults.outlinedButtonColors(
                             contentColor = MaterialTheme.colorScheme.error

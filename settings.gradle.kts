@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "ApplyFlow"
+rootProject.name = "1Click Apply"
 
 include(":app")

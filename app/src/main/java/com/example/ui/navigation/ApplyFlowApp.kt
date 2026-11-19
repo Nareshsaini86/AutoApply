@@ -307,7 +307,7 @@ private fun AuthenticatedApplyFlowShell(
                                 selected = selected,
                                 onClick = {
                                     navigateToTab(tab.route)
-                                    if (tab.route == ROUTE_MAILBOX && composer.isGmailReady && mailbox.messages.isEmpty()) {
+                                    if (tab.route == ROUTE_MAILBOX && composer.isGmailReady) {
                                         viewModel.loadMailbox()
                                     }
                                 },
@@ -347,7 +347,7 @@ private fun AuthenticatedApplyFlowShell(
                                 selected = selected,
                                 onClick = {
                                     navigateToTab(tab.route)
-                                    if (tab.route == ROUTE_MAILBOX && composer.isGmailReady && mailbox.messages.isEmpty()) {
+                                    if (tab.route == ROUTE_MAILBOX && composer.isGmailReady) {
                                         viewModel.loadMailbox()
                                     }
                                 },
@@ -380,6 +380,7 @@ private fun AuthenticatedApplyFlowShell(
                     ) {
                         composable(ROUTE_LINKEDIN) {
                             LinkedInScreen(
+                                profile = (profileState as? UiState.Success)?.data,
                                 capturedPost = composer.capturedLinkedInPost,
                                 duplicateMatches = (applicationsState as? UiState.Success)?.data.orEmpty(),
                                 isSending = composer.isSending,
@@ -431,6 +432,10 @@ private fun AuthenticatedApplyFlowShell(
                                 onClearSelection = viewModel::clearMessageSelection,
                                 onDeleteSelected = viewModel::deleteSelectedEmails,
                                 onDeleteSingle = viewModel::deleteSingleEmail,
+                                onOpenMessage = viewModel::onMailboxMessageOpened,
+                                onCloseMessage = viewModel::clearAutoReplyDraft,
+                                onUpdateAutoReply = viewModel::updateAutoReplyDraft,
+                                onSendOneClickReply = viewModel::sendAutoReplyInOneClick,
                                 onSendDirectEmail = viewModel::sendDirectEmail
                             )
                         }

@@ -217,7 +217,7 @@ fun ApplyScreen(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                             Text(
-                                text = "Enable full Gmail Send & Receive access so ApplyFlow can auto-email your CV and track replies.",
+                                text = "Enable full Gmail Send & Receive access so 1Click Apply can auto-email your CV and track replies.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                             )
@@ -320,7 +320,7 @@ fun ApplyScreen(
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                 modifier = Modifier.testTag("load_sample_button")
                             ) {
-                                Text("Sample (.NET)", style = MaterialTheme.typography.labelMedium)
+                                Text("Sample Post", style = MaterialTheme.typography.labelMedium)
                             }
                         }
                     }

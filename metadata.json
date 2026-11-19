@@ -1,6 +1,6 @@
 {
-  "name": "ApplyFlow",
-  "description": "Automated LinkedIn job application and Gmail follow-up tracker with AI parsing and resume attachment.",
+  "name": "1Click Apply",
+  "description": "One-click LinkedIn job application and Gmail follow-up tracker with resume matching and automatic PDF CV dispatch.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

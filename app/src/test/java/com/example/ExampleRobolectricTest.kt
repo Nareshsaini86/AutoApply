@@ -7,6 +7,7 @@ import com.example.data.gmail.EmailTemplateFormatter
 import com.example.data.gmail.GmailService
 import com.example.data.gmail.GmailSmtpManager
 import com.example.data.model.CandidateProfile
+import com.example.data.model.EmailMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,10 +20,10 @@ import org.robolectric.annotation.Config
 class ExampleRobolectricTest {
 
     @Test
-    fun `app name matches ApplyFlow`() {
+    fun `app name matches 1Click Apply`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("ApplyFlow", appName)
+        assertEquals("1Click Apply", appName)
     }
 
     @Test
@@ -229,5 +230,109 @@ class ExampleRobolectricTest {
         assertTrue(parsed[0].snippet.contains("Dear Aman, Please find attached my CV"))
         assertEquals("SENT:401", parsed[1].uid)
         assertEquals("401", parsed[1].imapUid)
+    }
+
+    @Test
+    fun `resume reader adapts to any uploaded career domain and LinkedIn query follows`() {
+        val aiRepo = JobAiRepository()
+        val base = CandidateProfile.defaultForUser("uid_2", "priya@gmail.com", "Priya Verma")
+
+        val marketingInsights = aiRepo.extractResumeInsightsLocally(
+            fileName = "Priya_Marketing_CV.pdf",
+            extractedPdfText = "Priya Verma Digital Marketing Specialist 4+ years experience in SEO Social Media campaigns +91 9876543210",
+            fallbackProfile = base
+        )
+        assertEquals("Digital Marketing Specialist", marketingInsights.targetRole)
+        assertEquals("Digital Marketing Specialist", marketingInsights.preferredSearchQuery)
+        assertEquals("4+ Years", marketingInsights.totalExperience)
+        assertTrue(marketingInsights.skillsSummary.contains("SEO"))
+
+        val updatedProfile = base.copy(
+            currentRole = marketingInsights.targetRole,
+            preferredSearchQuery = marketingInsights.preferredSearchQuery
+        )
+        assertEquals(
+            "Digital Marketing Specialist",
+            com.example.ui.screens.deriveLinkedInRoleQuery(updatedProfile)
+        )
+
+        val javaInsights = aiRepo.extractResumeInsightsLocally(
+            fileName = "Rahul_Java_Resume.pdf",
+            extractedPdfText = "Senior Java Developer with 3 years experience in Spring Boot Microservices Docker SQL",
+            fallbackProfile = base
+        )
+        assertEquals("Java Backend Developer", javaInsights.targetRole)
+        assertEquals("Java Backend Developer", javaInsights.preferredSearchQuery)
+    }
+
+    @Test
+    fun `imap batch fetch handles BODY TEXT before HEADER with Quoted-Printable and populates fullBody`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val smtp = GmailSmtpManager(context)
+        val batchResp = """
+            * 25 FETCH (UID 812 BODY[TEXT]<0> {140}
+            Content-Type: text/plain; charset="UTF-8"
+            Content-Transfer-Encoding: quoted-printable
+
+            Hi Naresh,=0APlease share Current CTC, Expected CTC=
+             and Notice Period.
+             BODY[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)] {120}
+            From: Priya Gupta <priya.gupta@webmobril.com>
+            To: nareshsaini868588@gmail.com
+            Subject: =?UTF-8?Q?Interview_Update_=2D_.NET_Role?=
+            Date: Wed, 19 Nov 2026
+            Message-ID: <reply-999@webmobril.com>
+
+            )
+            A4 OK Success
+        """.trimIndent()
+
+        val parsed = smtp.parseImapBatchFetchResponse(
+            batchResponse = batchResp,
+            mailbox = "INBOX",
+            folderPath = "INBOX"
+        )
+        assertEquals(1, parsed.size)
+        val msg = parsed[0]
+        assertEquals("INBOX:812", msg.uid)
+        assertEquals("812", msg.imapUid)
+        assertEquals("Interview Update - .NET Role", msg.subject)
+        assertEquals("<reply-999@webmobril.com>", msg.messageId)
+        assertTrue(msg.fullBody.contains("Please share Current CTC, Expected CTC and Notice Period."))
+    }
+
+    @Test
+    fun `inbox auto-reply extractor detects recruiter questions and fills candidate details`() {
+        val aiRepo = JobAiRepository()
+        val profile = CandidateProfile.defaultForUser("uid_1", "nareshsaini868588@gmail.com", "Naresh Saini")
+            .copy(
+                currentCtc = "10 LPA",
+                expectedCtc = "14 LPA",
+                noticePeriod = "15 Days",
+                currentLocation = "Noida, India"
+            )
+        val incoming = EmailMessage(
+            uid = "INBOX:812",
+            folder = "INBOX",
+            from = "Priya Gupta <priya.gupta@webmobril.com>",
+            to = "nareshsaini868588@gmail.com",
+            subject = "Shortlisted for Sr. .NET Developer - Few Details Needed",
+            date = "Wed, 19 Nov 2026",
+            snippet = "Hi Naresh, please share Current CTC, Expected CTC, Notice Period, Current Location and updated CV.",
+            messageId = "<reply-999@webmobril.com>",
+            fullBody = "Hi Naresh,\n\nWe shortlisted your profile! Please share your Total Experience, Current CTC, Expected CTC, Notice Period, Current Location, and attach your updated CV."
+        )
+
+        val draft = aiRepo.extractAutoReplyLocally(incoming, profile)
+        assertEquals("priya.gupta@webmobril.com", draft.toEmail)
+        assertEquals("Re: Shortlisted for Sr. .NET Developer - Few Details Needed", draft.subject)
+        assertEquals("<reply-999@webmobril.com>", draft.inReplyTo)
+        assertTrue(draft.attachResume)
+        assertTrue(draft.detectedRequirements.containsAll(listOf("Total Experience", "Current CTC", "Expected CTC", "Notice Period", "Current Location", "Updated CV")))
+        assertTrue(draft.body.contains("Dear Priya,"))
+        assertTrue(draft.body.contains("10 LPA"))
+        assertTrue(draft.body.contains("14 LPA"))
+        assertTrue(draft.body.contains("15 Days"))
+        assertTrue(draft.body.contains("Noida, India"))
     }
 }

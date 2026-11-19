@@ -48,6 +48,7 @@ data class CandidateProfile(
     val skillsSummary: String = "",
     val resumeSummary: String = "",
     val resumeFileName: String = "NareshSaini_Resume.pdf",
+    val preferredSearchQuery: String = "",
     val autoFollowUpSend: Boolean = true,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
@@ -73,11 +74,22 @@ data class CandidateProfile(
                 skillsSummary = "ASP.NET Core, C#, ASP.NET MVC, REST API, SQL Server, Entity Framework, React.js, Crystal Reports, Azure, AWS",
                 resumeSummary = "Sr. Software Developer at Prologic First India Pvt. Ltd. (Nov 2021 - Present) with 5+ years of experience building scalable enterprise web applications in ASP.NET Core, C#, ASP.NET MVC, and SQL Server. Led Touche POS System, Central Order Taking System (React.js + REST APIs), Store Value Card System, and SpaceTrack. Improved SQL stored procedure efficiency by 60-80%, integrated Hotel/GST/Payment APIs, and migrated legacy VB6 modules to .NET Core. Holds MCA (AKTU) and BCA (MDU).",
                 resumeFileName = "NareshSaini_Resume.pdf",
+                preferredSearchQuery = ".NET Full Stack",
                 autoFollowUpSend = true
             )
         }
     }
 }
+
+data class ResumeInsights(
+    val targetRole: String,
+    val preferredSearchQuery: String,
+    val skillsSummary: String,
+    val totalExperience: String,
+    val resumeSummary: String,
+    val phone: String = "",
+    val linkedinUrl: String = ""
+)
 
 @Keep
 @IgnoreExtraProperties
@@ -142,7 +154,17 @@ data class EmailMessage(
     val messageId: String = "",
     val isRecruiterRelated: Boolean = false,
     val imapUid: String = "",
-    val folderPath: String = ""
+    val folderPath: String = "",
+    val fullBody: String = ""
+)
+
+data class AutoReplyDraft(
+    val toEmail: String,
+    val subject: String,
+    val body: String,
+    val detectedRequirements: List<String> = emptyList(),
+    val attachResume: Boolean = true,
+    val inReplyTo: String? = null
 )
 
 data class CapturedLinkedInPost(

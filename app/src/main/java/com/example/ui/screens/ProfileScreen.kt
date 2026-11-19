@@ -166,8 +166,8 @@ fun ProfileScreen(
                             Text(
                                 text = when {
                                     isSmtpConnected -> "Connected via Gmail App Password (${smtpEmail.ifBlank { email }}). Automated applications, follow-ups & reply sync are active."
-                                    isGmailAuthorized -> "Connected via Google OAuth (${email}). ApplyFlow can send applications and follow-up emails directly."
-                                    else -> "Connect your Gmail using a Google App Password (no 403 block) or Google OAuth so ApplyFlow can auto-send emails with your CV."
+                                    isGmailAuthorized -> "Connected via Google OAuth (${email}). 1Click Apply can send applications and follow-up emails directly."
+                                    else -> "Connect your Gmail using a Google App Password (no 403 block) or Google OAuth so 1Click Apply can auto-send emails with your CV."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

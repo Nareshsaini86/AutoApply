@@ -12,6 +12,7 @@ import com.example.data.gmail.GmailService
 import com.example.data.gmail.GmailSmtpManager
 import com.example.data.gmail.ResumeStorageManager
 import com.example.data.model.ApplicationStatus
+import com.example.data.model.AutoReplyDraft
 import com.example.data.model.CandidateProfile
 import com.example.data.model.CapturedLinkedInPost
 import com.example.data.model.EmailMessage
@@ -78,11 +79,14 @@ data class MailboxUiState(
     val selectedFolder: String = "INBOX",
     val messages: List<EmailMessage> = emptyList(),
     val isLoading: Boolean = false,
+    val isRefreshing: Boolean = false,
     val error: String? = null,
     val isSendingEmail: Boolean = false,
     val isDeleting: Boolean = false,
     val selectedUids: Set<String> = emptySet(),
-    val isSelectionMode: Boolean = false
+    val isSelectionMode: Boolean = false,
+    val autoReplyDraft: AutoReplyDraft? = null,
+    val isPolishingReply: Boolean = false
 )
 
 sealed interface UiEvent {
@@ -171,8 +175,10 @@ class ApplyFlowViewModel(
     private var queuedWork: QueuedGmailWork = QueuedGmailWork.NONE
     private var queuedFollowUpApp: JobApplication? = null
     private var polishJob: Job? = null
+    private var replyPolishJob: Job? = null
     private var mailboxLoadJob: Job? = null
     private var userManuallyEditedDraft: Boolean = false
+    private var userEditedAutoReply: Boolean = false
 
     init {
         viewModelScope.launch {
@@ -182,6 +188,7 @@ class ApplyFlowViewModel(
             applicationsState.collect { state ->
                 if (state is UiState.Success) {
                     refreshDuplicateCheck(state.data)
+                    retagMailboxRecruiters(state.data)
                 }
             }
         }
@@ -490,48 +497,73 @@ class ApplyFlowViewModel(
                 it.copy(
                     selectedFolder = folder,
                     isLoading = false,
+                    isRefreshing = false,
                     messages = emptyList(),
                     selectedUids = emptySet(),
-                    isSelectionMode = false
+                    isSelectionMode = false,
+                    autoReplyDraft = null
                 )
             }
             return
         }
 
         val switchingFolder = !_mailbox.value.selectedFolder.equals(folder, ignoreCase = true)
+        val hasExisting = !switchingFolder && _mailbox.value.messages.isNotEmpty()
         mailboxLoadJob = viewModelScope.launch {
             _mailbox.update {
                 it.copy(
                     selectedFolder = folder,
-                    isLoading = true,
+                    isLoading = !hasExisting,
+                    isRefreshing = hasExisting,
                     error = null,
                     messages = if (switchingFolder) emptyList() else it.messages,
-                    selectedUids = emptySet(),
-                    isSelectionMode = false
+                    selectedUids = if (switchingFolder) emptySet() else it.selectedUids,
+                    isSelectionMode = if (switchingFolder) false else it.isSelectionMode,
+                    autoReplyDraft = if (switchingFolder) null else it.autoReplyDraft
                 )
             }
             try {
                 val result = withTimeout(25_000L) {
                     if (smtpCreds != null) {
-                        smtpManager.fetchRecentEmailsViaImap(smtpCreds, mailbox = folder, limit = 20)
+                        smtpManager.fetchRecentEmailsViaImap(smtpCreds, mailbox = folder, limit = 25)
                     } else {
-                        gmailService.fetchRecentMessages(oauthToken.orEmpty(), mailbox = folder, maxResults = 20)
+                        gmailService.fetchRecentMessages(oauthToken.orEmpty(), mailbox = folder, maxResults = 25)
                     }
                 }
                 result.onSuccess { list ->
-                    val trackedEmails = (applicationsState.value as? UiState.Success)?.data
-                        ?.map { it.recruiterEmail.lowercase() }?.toSet().orEmpty()
+                    val apps = (applicationsState.value as? UiState.Success)?.data.orEmpty()
+                    val trackedEmails = apps.map { it.recruiterEmail.trim().lowercase() }
+                        .filter { it.isNotBlank() }
+                        .toSet()
+
                     val tagged = list.map { msg ->
-                        val matched = trackedEmails.any { addr ->
-                            addr.isNotBlank() && (msg.from.contains(addr, ignoreCase = true) || msg.to.contains(addr, ignoreCase = true))
-                        }
-                        msg.copy(isRecruiterRelated = matched)
+                        msg.copy(isRecruiterRelated = isLikelyRecruiterMessage(msg, trackedEmails))
                     }
-                    _mailbox.update { it.copy(isLoading = false, messages = tagged, error = null) }
+                    _mailbox.update {
+                        it.copy(
+                            isLoading = false,
+                            isRefreshing = false,
+                            messages = tagged,
+                            error = null
+                        )
+                    }
+
+                    // Auto-sync REPLIED status if Inbox shows an incoming message from any applied recruiter
+                    if (folder.equals("INBOX", ignoreCase = true) && apps.isNotEmpty()) {
+                        for (app in apps) {
+                            if ((app.statusEnum == ApplicationStatus.APPLIED || app.statusEnum == ApplicationStatus.FOLLOW_UP_SENT) &&
+                                app.recruiterEmail.isNotBlank() &&
+                                tagged.any { it.from.contains(app.recruiterEmail, ignoreCase = true) }
+                            ) {
+                                repository.updateStatus(currentUserId, app.id, ApplicationStatus.REPLIED)
+                            }
+                        }
+                    }
                 }.onFailure { err ->
                     _mailbox.update {
                         it.copy(
                             isLoading = false,
+                            isRefreshing = false,
                             error = err.localizedMessage ?: "Could not load $folder emails."
                         )
                     }
@@ -540,6 +572,7 @@ class ApplyFlowViewModel(
                 _mailbox.update {
                     it.copy(
                         isLoading = false,
+                        isRefreshing = false,
                         error = "Timed out loading $folder. Check your internet connection and tap Refresh."
                     )
                 }
@@ -549,11 +582,135 @@ class ApplyFlowViewModel(
                 _mailbox.update {
                     it.copy(
                         isLoading = false,
+                        isRefreshing = false,
                         error = e.localizedMessage ?: "Could not load $folder emails."
                     )
                 }
             }
         }
+    }
+
+    fun onMailboxMessageOpened(msg: EmailMessage) {
+        replyPolishJob?.cancel()
+        userEditedAutoReply = false
+
+        if (!msg.folder.equals("INBOX", ignoreCase = true)) {
+            _mailbox.update { it.copy(autoReplyDraft = null, isPolishingReply = false) }
+            return
+        }
+
+        val currentProfile = (profileState.value as? UiState.Success)?.data
+            ?: CandidateProfile.defaultForUser(currentUserId, authEmail, authDisplayName)
+        val trackedApps = (applicationsState.value as? UiState.Success)?.data.orEmpty()
+
+        val instantDraft = aiRepository.extractAutoReplyLocally(msg, currentProfile, trackedApps)
+        _mailbox.update {
+            it.copy(
+                autoReplyDraft = instantDraft,
+                isPolishingReply = true
+            )
+        }
+
+        val matchedApp = trackedApps.firstOrNull { app ->
+            (instantDraft.toEmail.isNotBlank() && app.recruiterEmail.equals(instantDraft.toEmail, ignoreCase = true)) ||
+                (app.emailSubject.isNotBlank() && msg.subject.contains(app.emailSubject.take(24), ignoreCase = true))
+        }
+        if (matchedApp != null &&
+            (matchedApp.statusEnum == ApplicationStatus.APPLIED || matchedApp.statusEnum == ApplicationStatus.FOLLOW_UP_SENT)
+        ) {
+            viewModelScope.launch {
+                repository.updateStatus(currentUserId, matchedApp.id, ApplicationStatus.REPLIED)
+            }
+        }
+
+        replyPolishJob = viewModelScope.launch {
+            aiRepository.polishAutoReplyWithGemini(msg, currentProfile, matchedApp)
+                .onSuccess { aiDraft ->
+                    if (!userEditedAutoReply) {
+                        _mailbox.update { state ->
+                            if (state.autoReplyDraft != null) {
+                                state.copy(
+                                    autoReplyDraft = aiDraft.copy(
+                                        inReplyTo = aiDraft.inReplyTo ?: state.autoReplyDraft.inReplyTo
+                                    ),
+                                    isPolishingReply = false
+                                )
+                            } else {
+                                state.copy(isPolishingReply = false)
+                            }
+                        }
+                    } else {
+                        _mailbox.update { it.copy(isPolishingReply = false) }
+                    }
+                }
+                .onFailure {
+                    _mailbox.update { it.copy(isPolishingReply = false) }
+                }
+        }
+    }
+
+    fun updateAutoReplyDraft(
+        subject: String? = null,
+        body: String? = null,
+        attachResume: Boolean? = null
+    ) {
+        userEditedAutoReply = true
+        _mailbox.update { state ->
+            val current = state.autoReplyDraft ?: return@update state
+            state.copy(
+                autoReplyDraft = current.copy(
+                    subject = subject ?: current.subject,
+                    body = body ?: current.body,
+                    attachResume = attachResume ?: current.attachResume
+                )
+            )
+        }
+    }
+
+    fun clearAutoReplyDraft() {
+        replyPolishJob?.cancel()
+        _mailbox.update { it.copy(autoReplyDraft = null, isPolishingReply = false) }
+    }
+
+    fun sendAutoReplyInOneClick(msg: EmailMessage) {
+        val currentProfile = (profileState.value as? UiState.Success)?.data
+            ?: CandidateProfile.defaultForUser(currentUserId, authEmail, authDisplayName)
+        val trackedApps = (applicationsState.value as? UiState.Success)?.data.orEmpty()
+        val draft = _mailbox.value.autoReplyDraft
+            ?: aiRepository.extractAutoReplyLocally(msg, currentProfile, trackedApps)
+
+        sendDirectEmail(
+            toEmail = draft.toEmail,
+            subject = draft.subject,
+            body = draft.body,
+            attachResume = draft.attachResume,
+            inReplyToHeader = draft.inReplyTo ?: msg.messageId.takeIf { it.isNotBlank() }
+        )
+    }
+
+    private fun retagMailboxRecruiters(apps: List<JobApplication>) {
+        val currentMessages = _mailbox.value.messages
+        if (currentMessages.isEmpty()) return
+        val trackedEmails = apps.map { it.recruiterEmail.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .toSet()
+        val updated = currentMessages.map { msg ->
+            msg.copy(isRecruiterRelated = isLikelyRecruiterMessage(msg, trackedEmails))
+        }
+        _mailbox.update { it.copy(messages = updated) }
+    }
+
+    private fun isLikelyRecruiterMessage(msg: EmailMessage, trackedEmails: Set<String>): Boolean {
+        val matchedTracked = trackedEmails.any { addr ->
+            msg.from.contains(addr, ignoreCase = true) || msg.to.contains(addr, ignoreCase = true)
+        }
+        if (matchedTracked) return true
+        val text = "${msg.from} ${msg.subject} ${msg.snippet}".lowercase()
+        return listOf(
+            "recruiter", "hiring", "interview", "shortlist", "current ctc", "expected ctc",
+            "notice period", "updated resume", "updated cv", "job opening", "hr@",
+            "talent@", "careers@", "jobs@"
+        ).any { text.contains(it) }
     }
 
     fun enterSelectionMode(initialUid: String? = null) {
@@ -832,7 +989,7 @@ class ApplyFlowViewModel(
                     val newApp = JobApplication(
                         userId = currentUserId,
                         companyName = state.companyName.ifBlank { inferCompanyFromEmail(state.recruiterEmail) },
-                        jobTitle = state.jobTitle.ifBlank { ".NET Developer" },
+                        jobTitle = state.jobTitle.ifBlank { currentProfile.currentRole.ifBlank { "Open Position" } },
                         recruiterEmail = state.recruiterEmail.trim().lowercase(),
                         recruiterName = state.recruiterName.trim(),
                         location = state.location.trim(),
@@ -916,10 +1073,12 @@ class ApplyFlowViewModel(
                     body = state.emailBody.trim(),
                     attachmentUri = uri
                 )
+                val fallbackRole = (profileState.value as? UiState.Success)?.data?.currentRole?.takeIf { it.isNotBlank() }
+                    ?: "Open Position"
                 val newApp = JobApplication(
                     userId = currentUserId,
                     companyName = state.companyName.ifBlank { inferCompanyFromEmail(email) },
-                    jobTitle = state.jobTitle.ifBlank { ".NET Developer" },
+                    jobTitle = state.jobTitle.ifBlank { fallbackRole },
                     recruiterEmail = email.lowercase(),
                     recruiterName = state.recruiterName.trim(),
                     location = state.location.trim(),
@@ -1186,8 +1345,15 @@ class ApplyFlowViewModel(
     }
 
     fun saveProfile(updated: CandidateProfile) {
+        val current = (profileState.value as? UiState.Success)?.data
+        val nextQuery = if (current != null && !updated.currentRole.equals(current.currentRole, ignoreCase = true)) {
+            ""
+        } else {
+            updated.preferredSearchQuery
+        }
+        val toSave = updated.copy(preferredSearchQuery = nextQuery)
         viewModelScope.launch {
-            repository.saveProfile(currentUserId, updated)
+            repository.saveProfile(currentUserId, toSave)
                 .onSuccess { _events.emit(UiEvent.Snackbar("Profile saved to cloud!")) }
                 .onFailure { err ->
                     _events.emit(UiEvent.Snackbar(err.localizedMessage ?: "Failed to save profile.", isError = true))
@@ -1200,11 +1366,53 @@ class ApplyFlowViewModel(
             resumeManager.importPdfFromUri(uri)
                 .onSuccess { fileName ->
                     _composer.update { it.copy(activeResumeName = fileName) }
-                    val currentProfile = (profileState.value as? UiState.Success)?.data
-                    if (currentProfile != null) {
-                        repository.saveProfile(currentUserId, currentProfile.copy(resumeFileName = fileName))
+                    val (_, pdfBytes) = resumeManager.getActiveResumeBytes()
+                    val extractedText = resumeManager.extractReadableTextFromPdfBytes(pdfBytes)
+
+                    val baseProfile = (profileState.value as? UiState.Success)?.data
+                        ?: CandidateProfile.defaultForUser(currentUserId, authEmail, authDisplayName)
+
+                    val localInsights = aiRepository.extractResumeInsightsLocally(
+                        fileName = fileName,
+                        extractedPdfText = extractedText,
+                        fallbackProfile = baseProfile
+                    )
+
+                    val updatedLocal = baseProfile.copy(
+                        resumeFileName = fileName,
+                        currentRole = localInsights.targetRole.ifBlank { baseProfile.currentRole },
+                        preferredSearchQuery = localInsights.preferredSearchQuery.ifBlank { localInsights.targetRole },
+                        skillsSummary = localInsights.skillsSummary.ifBlank { baseProfile.skillsSummary },
+                        totalExperience = localInsights.totalExperience.ifBlank { baseProfile.totalExperience },
+                        resumeSummary = localInsights.resumeSummary.ifBlank { baseProfile.resumeSummary },
+                        phone = baseProfile.phone.ifBlank { localInsights.phone },
+                        linkedinUrl = baseProfile.linkedinUrl.ifBlank { localInsights.linkedinUrl }
+                    )
+                    repository.saveProfile(currentUserId, updatedLocal)
+
+                    val matchedLabel = updatedLocal.preferredSearchQuery.ifBlank { updatedLocal.currentRole }
+                    _events.emit(
+                        UiEvent.Snackbar("Resume read ($fileName) • Matched jobs: $matchedLabel")
+                    )
+
+                    // Optional non-blocking Gemini multimodal PDF refinement for richer role/summary matching
+                    launch {
+                        aiRepository.analyzeResumePdfWithGemini(fileName, pdfBytes, extractedText)
+                            .onSuccess { aiInsights ->
+                                val latestProfile = (profileState.value as? UiState.Success)?.data ?: updatedLocal
+                                val refined = latestProfile.copy(
+                                    resumeFileName = fileName,
+                                    currentRole = aiInsights.targetRole.ifBlank { latestProfile.currentRole },
+                                    preferredSearchQuery = aiInsights.preferredSearchQuery.ifBlank { latestProfile.preferredSearchQuery },
+                                    skillsSummary = aiInsights.skillsSummary.ifBlank { latestProfile.skillsSummary },
+                                    totalExperience = aiInsights.totalExperience.ifBlank { latestProfile.totalExperience },
+                                    resumeSummary = aiInsights.resumeSummary.ifBlank { latestProfile.resumeSummary },
+                                    phone = latestProfile.phone.ifBlank { aiInsights.phone },
+                                    linkedinUrl = latestProfile.linkedinUrl.ifBlank { aiInsights.linkedinUrl }
+                                )
+                                repository.saveProfile(currentUserId, refined)
+                            }
                     }
-                    _events.emit(UiEvent.Snackbar("Resume updated: $fileName"))
                 }
                 .onFailure { err ->
                     _events.emit(UiEvent.Snackbar(err.localizedMessage ?: "Could not attach PDF.", isError = true))
