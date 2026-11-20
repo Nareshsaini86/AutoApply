@@ -112,7 +112,13 @@ class ApplicationRepository(
                 currentLocation = profile.currentLocation.trim().take(120),
                 skillsSummary = profile.skillsSummary.trim().take(1000),
                 resumeSummary = profile.resumeSummary.trim().take(4000),
-                resumeFileName = profile.resumeFileName.trim().take(200)
+                resumeFileName = profile.resumeFileName.trim().take(200),
+                preferredSearchQuery = profile.preferredSearchQuery.trim().take(150),
+                linkedinJobFilters = profile.linkedinJobFilters
+                    .map { it.trim().take(80) }
+                    .filter { it.isNotBlank() }
+                    .distinctBy { it.lowercase() }
+                    .take(20)
             )
             val docRef = db.collection("users").document(uid)
             val existing = docRef.get().await()
@@ -134,6 +140,8 @@ class ApplicationRepository(
                         "skillsSummary" to sanitized.skillsSummary,
                         "resumeSummary" to sanitized.resumeSummary,
                         "resumeFileName" to sanitized.resumeFileName,
+                        "preferredSearchQuery" to sanitized.preferredSearchQuery,
+                        "linkedinJobFilters" to sanitized.linkedinJobFilters,
                         "autoFollowUpSend" to sanitized.autoFollowUpSend,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
@@ -322,6 +330,8 @@ class ApplicationRepository(
             "skillsSummary" to profile.skillsSummary,
             "resumeSummary" to profile.resumeSummary,
             "resumeFileName" to profile.resumeFileName,
+            "preferredSearchQuery" to profile.preferredSearchQuery,
+            "linkedinJobFilters" to profile.linkedinJobFilters,
             "autoFollowUpSend" to profile.autoFollowUpSend,
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()

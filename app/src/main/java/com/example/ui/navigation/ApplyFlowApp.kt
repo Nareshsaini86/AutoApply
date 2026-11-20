@@ -1,8 +1,12 @@
 package com.example.ui.navigation
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -66,6 +70,7 @@ import com.example.auth.extractGmailTokenFromIntent
 import com.example.auth.requestGmailAuthorization
 import com.example.auth.signOut
 import com.example.data.ai.JobAiRepository
+import com.example.data.gmail.EmailNotificationHelper
 import com.example.data.gmail.GmailService
 import com.example.data.gmail.GmailSmtpManager
 import com.example.data.gmail.ResumeStorageManager
@@ -259,6 +264,22 @@ private fun AuthenticatedApplyFlowShell(
         }
     }
 
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    LaunchedEffect(currentUserId) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
@@ -270,6 +291,14 @@ private fun AuthenticatedApplyFlowShell(
                 }
                 is UiEvent.LaunchIntent -> {
                     context.startActivity(event.intent)
+                }
+                is UiEvent.ShowEmailSentNotification -> {
+                    EmailNotificationHelper.showEmailSentNotification(
+                        context = context,
+                        toEmail = event.toEmail,
+                        companyName = event.companyName,
+                        resumeFileName = event.resumeFileName
+                    )
                 }
                 UiEvent.RequestGmailOAuthDirect -> {
                     launchGmailOAuth()
@@ -384,9 +413,12 @@ private fun AuthenticatedApplyFlowShell(
                                 capturedPost = composer.capturedLinkedInPost,
                                 duplicateMatches = (applicationsState as? UiState.Success)?.data.orEmpty(),
                                 isSending = composer.isSending,
+                                lastSentBanner = composer.lastLinkedInSentMessage,
                                 onPostCaptured = viewModel::onLinkedInPostCaptured,
                                 onDismissCapturedPost = viewModel::dismissCapturedLinkedInPost,
-                                onApplyFromCapturedPost = viewModel::applyFromCapturedLinkedInPost
+                                onApplyFromCapturedPost = viewModel::applyFromCapturedLinkedInPost,
+                                onDismissSentBanner = viewModel::dismissLinkedInSentBanner,
+                                onNavigateToProfileFilters = { navigateToTab(ROUTE_PROFILE) }
                             )
                         }
 
@@ -467,6 +499,7 @@ private fun AuthenticatedApplyFlowShell(
                                 onConnectGmail = viewModel::openGmailConnectSheet,
                                 onDisconnectGmail = viewModel::disconnectSmtp,
                                 onSaveProfile = viewModel::saveProfile,
+                                onUpdateJobFilters = viewModel::updateLinkedInJobFilters,
                                 onImportPdf = viewModel::importResumePdf,
                                 onSignOut = onSignOut
                             )

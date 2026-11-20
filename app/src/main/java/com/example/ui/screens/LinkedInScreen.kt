@@ -35,15 +35,18 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -78,9 +81,12 @@ fun LinkedInScreen(
     capturedPost: CapturedLinkedInPost?,
     duplicateMatches: List<JobApplication>,
     isSending: Boolean,
+    lastSentBanner: String? = null,
     onPostCaptured: (rawText: String, explicitEmail: String) -> Unit,
     onDismissCapturedPost: () -> Unit,
     onApplyFromCapturedPost: (autoSend: Boolean) -> Unit,
+    onDismissSentBanner: () -> Unit = {},
+    onNavigateToProfileFilters: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
@@ -89,16 +95,27 @@ fun LinkedInScreen(
     var loadProgress by remember { mutableIntStateOf(0) }
     var currentUrl by remember { mutableStateOf(LINKEDIN_FEED_URL) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
-    val resumeRoleQuery = remember(profile?.preferredSearchQuery, profile?.currentRole, profile?.skillsSummary) {
-        deriveLinkedInRoleQuery(profile)
+    val profileFilters = remember(
+        profile?.linkedinJobFilters,
+        profile?.preferredSearchQuery,
+        profile?.currentRole,
+        profile?.skillsSummary
+    ) {
+        deriveLinkedInFiltersList(profile)
     }
-    val hiringSearchUrl = remember(resumeRoleQuery) {
-        val kw = if (resumeRoleQuery.isNotBlank()) "$resumeRoleQuery hiring email" else "hiring email"
-        "https://www.linkedin.com/search/results/content/?keywords=${Uri.encode(kw)}"
+    var selectedFilter by remember(profileFilters) {
+        mutableStateOf(profileFilters.firstOrNull().orEmpty())
     }
-    val jobsSearchUrl = remember(resumeRoleQuery) {
-        if (resumeRoleQuery.isNotBlank()) {
-            "https://www.linkedin.com/jobs/search/?keywords=${Uri.encode(resumeRoleQuery)}"
+    var showJobsBoard by remember { mutableStateOf(false) }
+
+    fun buildHiringSearchUrl(filter: String): String {
+        val kw = if (filter.isNotBlank()) "$filter hiring email" else "hiring email"
+        return "https://www.linkedin.com/search/results/content/?keywords=${Uri.encode(kw)}"
+    }
+
+    fun buildJobsSearchUrl(filter: String): String {
+        return if (filter.isNotBlank()) {
+            "https://www.linkedin.com/jobs/search/?keywords=${Uri.encode(filter)}"
         } else {
             LINKEDIN_JOBS_BASE_URL
         }
@@ -172,8 +189,8 @@ fun LinkedInScreen(
                             maxLines = 1
                         )
                         Text(
-                            text = if (resumeRoleQuery.isNotBlank()) {
-                                "Resume match: $resumeRoleQuery • Tap post"
+                            text = if (selectedFilter.isNotBlank()) {
+                                "Looking for: $selectedFilter • Tap any post"
                             } else {
                                 "Tap any hiring post to extract email & CV"
                             },
@@ -208,29 +225,119 @@ fun LinkedInScreen(
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
                         .padding(horizontal = 12.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    AssistChip(
-                        onClick = { webViewRef?.loadUrl(LINKEDIN_FEED_URL) },
+                    FilterChip(
+                        selected = currentUrl.contains("/feed", ignoreCase = true) && !showJobsBoard,
+                        onClick = {
+                            showJobsBoard = false
+                            webViewRef?.loadUrl(LINKEDIN_FEED_URL)
+                        },
                         label = { Text("Feed") }
                     )
-                    AssistChip(
-                        onClick = { webViewRef?.loadUrl(hiringSearchUrl) },
-                        label = {
-                            Text(
-                                if (resumeRoleQuery.isNotBlank()) "Hiring: $resumeRoleQuery" else "Hiring Posts"
-                            )
+
+                    profileFilters.forEach { filter ->
+                        val isActive = selectedFilter.equals(filter, ignoreCase = true) &&
+                            (currentUrl.contains("search/results", ignoreCase = true) || currentUrl.contains("/jobs", ignoreCase = true))
+                        FilterChip(
+                            selected = isActive && !showJobsBoard,
+                            onClick = {
+                                selectedFilter = filter
+                                showJobsBoard = false
+                                webViewRef?.loadUrl(buildHiringSearchUrl(filter))
+                            },
+                            label = { Text(filter) },
+                            modifier = Modifier.testTag("linkedin_filter_chip_$filter")
+                        )
+                    }
+
+                    FilterChip(
+                        selected = showJobsBoard,
+                        onClick = {
+                            val active = selectedFilter.ifBlank { profileFilters.firstOrNull().orEmpty() }
+                            showJobsBoard = true
+                            webViewRef?.loadUrl(buildJobsSearchUrl(active))
                         },
-                        modifier = Modifier.testTag("linkedin_resume_hiring_chip")
-                    )
-                    AssistChip(
-                        onClick = { webViewRef?.loadUrl(jobsSearchUrl) },
                         label = {
                             Text(
-                                if (resumeRoleQuery.isNotBlank()) "Jobs: $resumeRoleQuery" else "LinkedIn Jobs"
+                                if (selectedFilter.isNotBlank()) "Jobs: $selectedFilter" else "LinkedIn Jobs"
                             )
                         }
                     )
+
+                    AssistChip(
+                        onClick = onNavigateToProfileFilters,
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Tune,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = { Text("Edit Filters") },
+                        modifier = Modifier.testTag("linkedin_edit_filters_chip")
+                    )
+                }
+
+                if (isSending) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Sending application & resume via Gmail...",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+
+                AnimatedVisibility(visible = !isSending && !lastSentBanner.isNullOrBlank()) {
+                    if (!lastSentBanner.isNullOrBlank()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("linkedin_email_sent_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.CheckCircle,
+                                    contentDescription = "Email sent",
+                                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = lastSentBanner,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                IconButton(
+                                    onClick = onDismissSentBanner,
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Dismiss notification",
+                                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if (loadProgress in 1..99) {
@@ -466,10 +573,24 @@ fun LinkedInScreen(
     }
 }
 
+internal fun deriveLinkedInFiltersList(profile: CandidateProfile?): List<String> {
+    if (profile == null) return emptyList()
+    val custom = profile.linkedinJobFilters
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinctBy { it.lowercase() }
+    if (custom.isNotEmpty()) return custom
+    val fallback = deriveLinkedInRoleQuery(profile)
+    return if (fallback.isNotBlank()) listOf(fallback) else emptyList()
+}
+
 internal fun deriveLinkedInRoleQuery(profile: CandidateProfile?): String {
     if (profile == null) return ""
     val explicit = profile.preferredSearchQuery.trim()
     if (explicit.isNotBlank()) return explicit
+
+    val explicitListFirst = profile.linkedinJobFilters.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+    if (explicitListFirst.isNotBlank()) return explicitListFirst
 
     val role = profile.currentRole
         .replace(Regex("\\b(Sr\\.?|Senior|Junior|Jr\\.?|Lead|Intern)\\b", RegexOption.IGNORE_CASE), "")

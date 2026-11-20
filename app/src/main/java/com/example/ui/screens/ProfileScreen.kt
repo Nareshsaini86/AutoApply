@@ -22,22 +22,30 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.MailOutline
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.WorkOutline
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -63,6 +71,7 @@ fun ProfileScreen(
     onConnectGmail: () -> Unit,
     onDisconnectGmail: () -> Unit,
     onSaveProfile: (CandidateProfile) -> Unit,
+    onUpdateJobFilters: (List<String>) -> Unit = {},
     onImportPdf: (Uri) -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
@@ -118,6 +127,8 @@ fun ProfileScreen(
                 var skills by remember(loaded.userId) { mutableStateOf(loaded.skillsSummary) }
                 var resumeSummary by remember(loaded.userId) { mutableStateOf(loaded.resumeSummary) }
                 var autoFollowUp by remember(loaded.userId) { mutableStateOf(loaded.autoFollowUpSend) }
+                var jobFilters by remember(loaded.userId) { mutableStateOf(loaded.linkedinJobFilters) }
+                var newFilterText by remember(loaded.userId) { mutableStateOf("") }
 
                 LaunchedEffect(loaded.updatedAt) {
                     fullName = loaded.fullName
@@ -133,6 +144,7 @@ fun ProfileScreen(
                     skills = loaded.skillsSummary
                     resumeSummary = loaded.resumeSummary
                     autoFollowUp = loaded.autoFollowUpSend
+                    jobFilters = loaded.linkedinJobFilters
                 }
 
                 Column(
@@ -264,6 +276,148 @@ fun ProfileScreen(
                                 Icon(Icons.Rounded.AttachFile, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text("Upload PDF")
+                            }
+                        }
+                    }
+
+                    // LinkedIn Job Filters Card
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        shape = MaterialTheme.shapes.large,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("profile_linkedin_filters_card")
+                    ) {
+                        fun addFilter(raw: String) {
+                            val clean = raw.trim()
+                            if (clean.isBlank()) return
+                            val next = (jobFilters + clean)
+                                .map { it.trim() }
+                                .filter { it.isNotBlank() }
+                                .distinctBy { it.lowercase() }
+                            jobFilters = next
+                            newFilterText = ""
+                            onUpdateJobFilters(next)
+                        }
+
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.WorkOutline,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "LinkedIn Job Search Filters",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+                            Text(
+                                text = "Add the job roles or keywords you are looking for. These appear as quick filter chips at the top of the LinkedIn tab.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = newFilterText,
+                                    onValueChange = { newFilterText = it },
+                                    label = { Text("Add job type / role / city") },
+                                    placeholder = { Text("e.g. .NET Developer, Remote, Java") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(onDone = { addFilter(newFilterText) }),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("profile_add_filter_input")
+                                )
+                                Button(
+                                    onClick = { addFilter(newFilterText) },
+                                    enabled = newFilterText.isNotBlank(),
+                                    modifier = Modifier
+                                        .height(52.dp)
+                                        .testTag("profile_add_filter_button")
+                                ) {
+                                    Icon(Icons.Rounded.Add, contentDescription = "Add filter", modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Add")
+                                }
+                            }
+
+                            if (jobFilters.isNotEmpty()) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    jobFilters.forEach { filter ->
+                                        InputChip(
+                                            selected = true,
+                                            onClick = {
+                                                val next = jobFilters.filterNot { it.equals(filter, ignoreCase = true) }
+                                                jobFilters = next
+                                                onUpdateJobFilters(next)
+                                            },
+                                            label = { Text(filter) },
+                                            trailingIcon = {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Close,
+                                                    contentDescription = "Remove $filter filter",
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            },
+                                            modifier = Modifier.testTag("profile_filter_chip_$filter")
+                                        )
+                                    }
+                                }
+                            }
+
+                            val suggestedRoles = remember(currentRole, skills) {
+                                val candidates = buildList {
+                                    if (currentRole.isNotBlank()) add(currentRole.substringBefore("(").trim())
+                                    skills.split(",").map { it.trim() }.filter { it.isNotBlank() }.take(4).forEach { add(it) }
+                                    add("Remote")
+                                    add("Immediate Joiner")
+                                }.distinctBy { it.lowercase() }
+                                candidates.filter { cand ->
+                                    jobFilters.none { it.equals(cand, ignoreCase = true) }
+                                }.take(5)
+                            }
+                            if (suggestedRoles.isNotEmpty()) {
+                                Text(
+                                    text = "Quick suggestions (tap to add):",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    suggestedRoles.forEach { suggestion ->
+                                        AssistChip(
+                                            onClick = { addFilter(suggestion) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Add,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                            },
+                                            label = { Text(suggestion) }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -454,6 +608,8 @@ fun ProfileScreen(
                                             skillsSummary = skills,
                                             resumeSummary = resumeSummary,
                                             resumeFileName = activeResumeName,
+                                            linkedinJobFilters = jobFilters,
+                                            preferredSearchQuery = jobFilters.firstOrNull().orEmpty(),
                                             autoFollowUpSend = autoFollowUp
                                         )
                                     )

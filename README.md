@@ -6,7 +6,7 @@ Apply to LinkedIn job posts in one click — upload any PDF resume, auto-extract
 
 ## How to Build & Share APK via GitHub
 
-This repository is pre-configured with a GitHub Actions workflow (`.github/workflows/build-apk.yml`) that automatically builds a ready-to-install APK (`1ClickApply-v1.0.apk`) signed with the project's Firebase debug keystore so **Google Sign-In works immediately**.
+This repository is pre-configured with a GitHub Actions workflow (`.github/workflows/main.yml`) using **JDK 21** and **Gradle 9.3.1** that automatically runs unit tests and builds a ready-to-install APK (`1ClickApply-v1.0.apk`) signed with the project's Firebase debug keystore so **Google Sign-In works immediately**.
 
 ### Step 1: Push Project to GitHub
 1. In Google AI Studio, open the **Settings / Export** menu and click **Push to GitHub** (or push this folder to a `main` / `master` branch on GitHub).

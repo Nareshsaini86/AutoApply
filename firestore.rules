@@ -49,6 +49,8 @@ service cloud.firestore {
              data.skillsSummary is string && data.skillsSummary.size() <= 1000 &&
              data.resumeSummary is string && data.resumeSummary.size() <= 4000 &&
              data.resumeFileName is string && data.resumeFileName.size() <= 200 &&
+             (!('preferredSearchQuery' in data) || (data.preferredSearchQuery is string && data.preferredSearchQuery.size() <= 150)) &&
+             (!('linkedinJobFilters' in data) || (data.linkedinJobFilters is list && data.linkedinJobFilters.size() <= 20)) &&
              data.autoFollowUpSend is bool &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
@@ -96,7 +98,8 @@ service cloud.firestore {
                          'userId', 'fullName', 'email', 'phone', 'linkedinUrl',
                          'currentRole', 'totalExperience', 'currentCtc', 'expectedCtc',
                          'noticePeriod', 'currentLocation', 'skillsSummary',
-                         'resumeSummary', 'resumeFileName', 'autoFollowUpSend',
+                         'resumeSummary', 'resumeFileName', 'preferredSearchQuery',
+                         'linkedinJobFilters', 'autoFollowUpSend',
                          'createdAt', 'updatedAt'
                        ]) &&
                        isValidCandidateProfile(incoming(), userId);
@@ -110,7 +113,8 @@ service cloud.firestore {
                          'fullName', 'email', 'phone', 'linkedinUrl',
                          'currentRole', 'totalExperience', 'currentCtc', 'expectedCtc',
                          'noticePeriod', 'currentLocation', 'skillsSummary',
-                         'resumeSummary', 'resumeFileName', 'autoFollowUpSend',
+                         'resumeSummary', 'resumeFileName', 'preferredSearchQuery',
+                         'linkedinJobFilters', 'autoFollowUpSend',
                          'updatedAt'
                        ]);
 

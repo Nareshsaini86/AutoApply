@@ -335,4 +335,17 @@ class ExampleRobolectricTest {
         assertTrue(draft.body.contains("15 Days"))
         assertTrue(draft.body.contains("Noida, India"))
     }
+
+    @Test
+    fun `profile linkedinJobFilters drive LinkedIn screen filter chips`() {
+        val profile = CandidateProfile.defaultForUser("uid_1", "naresh@gmail.com", "Naresh Saini")
+            .copy(
+                preferredSearchQuery = "C# Backend",
+                linkedinJobFilters = listOf("C# Backend", "ASP.NET Core", "Remote", "C# Backend")
+            )
+
+        val filters = com.example.ui.screens.deriveLinkedInFiltersList(profile)
+        assertEquals(listOf("C# Backend", "ASP.NET Core", "Remote"), filters)
+        assertEquals("C# Backend", com.example.ui.screens.deriveLinkedInRoleQuery(profile))
+    }
 }

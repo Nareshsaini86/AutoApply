@@ -69,7 +69,8 @@ data class ComposerUiState(
     val followUpInProgressId: String? = null,
     val previewFollowUpPair: Pair<JobApplication, FollowUpDraft>? = null,
     val isSyncingReplies: Boolean = false,
-    val capturedLinkedInPost: CapturedLinkedInPost? = null
+    val capturedLinkedInPost: CapturedLinkedInPost? = null,
+    val lastLinkedInSentMessage: String? = null
 ) {
     val isGmailReady: Boolean
         get() = isSmtpConnected || !gmailAccessToken.isNullOrBlank()
@@ -92,6 +93,11 @@ data class MailboxUiState(
 sealed interface UiEvent {
     data class Snackbar(val message: String, val isError: Boolean = false) : UiEvent
     data class LaunchIntent(val intent: Intent) : UiEvent
+    data class ShowEmailSentNotification(
+        val toEmail: String,
+        val companyName: String,
+        val resumeFileName: String
+    ) : UiEvent
     data object RequestGmailOAuthDirect : UiEvent
     data object ApplicationSentNavigateTracker : UiEvent
     data object NavigateToApplyTab : UiEvent
@@ -179,6 +185,7 @@ class ApplyFlowViewModel(
     private var mailboxLoadJob: Job? = null
     private var userManuallyEditedDraft: Boolean = false
     private var userEditedAutoReply: Boolean = false
+    private var stayOnCurrentTabAfterSend: Boolean = false
 
     init {
         viewModelScope.launch {
@@ -236,7 +243,10 @@ class ApplyFlowViewModel(
         refreshDuplicateCheck(apps)
     }
 
-    fun extractAndDraftWithAi(autoSendAfterExtract: Boolean = false) {
+    fun extractAndDraftWithAi(
+        autoSendAfterExtract: Boolean = false,
+        stayOnCurrentTab: Boolean = false
+    ) {
         val rawText = _composer.value.rawPostText.trim()
         if (rawText.length < 10) {
             _composer.update {
@@ -251,6 +261,7 @@ class ApplyFlowViewModel(
         // Step 1: Instant (<5ms) structured extraction so the button NEVER hangs
         polishJob?.cancel()
         userManuallyEditedDraft = false
+        stayOnCurrentTabAfterSend = stayOnCurrentTab
         val instantDraft = aiRepository.extractAndFormatLocally(rawText, currentProfile)
         _composer.update { state ->
             state.copy(
@@ -347,12 +358,17 @@ class ApplyFlowViewModel(
                 capturedLinkedInPost = null
             )
         }
-        extractAndDraftWithAi(autoSendAfterExtract = autoSend)
+        // Keep the user inside LinkedIn when using Auto-Send so they can apply to more posts right away
+        extractAndDraftWithAi(autoSendAfterExtract = autoSend, stayOnCurrentTab = autoSend)
         if (!autoSend) {
             viewModelScope.launch {
                 _events.emit(UiEvent.NavigateToApplyTab)
             }
         }
+    }
+
+    fun dismissLinkedInSentBanner() {
+        _composer.update { it.copy(lastLinkedInSentMessage = null) }
     }
 
     fun handleSharedLinkedInText(sharedText: String) {
@@ -1005,6 +1021,11 @@ class ApplyFlowViewModel(
                     )
                     repository.createApplication(currentUserId, newApp)
                         .onSuccess {
+                            val sentToEmail = state.recruiterEmail.trim()
+                            val sentCompany = newApp.companyName
+                            val keepTab = stayOnCurrentTabAfterSend
+                            stayOnCurrentTabAfterSend = false
+
                             _composer.update {
                                 it.copy(
                                     isSending = false,
@@ -1020,11 +1041,29 @@ class ApplyFlowViewModel(
                                     emailSubject = "",
                                     emailBody = "",
                                     extractionNotice = null,
-                                    duplicateMatches = emptyList()
+                                    duplicateMatches = emptyList(),
+                                    lastLinkedInSentMessage = if (keepTab) {
+                                        "Email sent to $sentToEmail ($sentCompany) with $fileName!"
+                                    } else {
+                                        it.lastLinkedInSentMessage
+                                    }
                                 )
                             }
-                            _events.emit(UiEvent.Snackbar("Application emailed with $fileName and saved to tracker!"))
-                            _events.emit(UiEvent.ApplicationSentNavigateTracker)
+                            _events.emit(
+                                UiEvent.ShowEmailSentNotification(
+                                    toEmail = sentToEmail,
+                                    companyName = sentCompany,
+                                    resumeFileName = fileName
+                                )
+                            )
+                            _events.emit(
+                                UiEvent.Snackbar(
+                                    "Email sent to $sentToEmail with $fileName & saved to Tracker!"
+                                )
+                            )
+                            if (!keepTab) {
+                                _events.emit(UiEvent.ApplicationSentNavigateTracker)
+                            }
                         }
                         .onFailure { dbErr ->
                             _composer.update {
@@ -1346,17 +1385,44 @@ class ApplyFlowViewModel(
 
     fun saveProfile(updated: CandidateProfile) {
         val current = (profileState.value as? UiState.Success)?.data
-        val nextQuery = if (current != null && !updated.currentRole.equals(current.currentRole, ignoreCase = true)) {
-            ""
-        } else {
-            updated.preferredSearchQuery
+        val cleanedFilters = updated.linkedinJobFilters
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+        val nextQuery = when {
+            cleanedFilters.isNotEmpty() -> cleanedFilters.first()
+            current != null && !updated.currentRole.equals(current.currentRole, ignoreCase = true) -> ""
+            else -> updated.preferredSearchQuery
         }
-        val toSave = updated.copy(preferredSearchQuery = nextQuery)
+        val toSave = updated.copy(
+            preferredSearchQuery = nextQuery,
+            linkedinJobFilters = cleanedFilters
+        )
         viewModelScope.launch {
             repository.saveProfile(currentUserId, toSave)
-                .onSuccess { _events.emit(UiEvent.Snackbar("Profile saved to cloud!")) }
+                .onSuccess { _events.emit(UiEvent.Snackbar("Profile & LinkedIn filters saved!")) }
                 .onFailure { err ->
                     _events.emit(UiEvent.Snackbar(err.localizedMessage ?: "Failed to save profile.", isError = true))
+                }
+        }
+    }
+
+    fun updateLinkedInJobFilters(filters: List<String>) {
+        val current = (profileState.value as? UiState.Success)?.data
+            ?: CandidateProfile.defaultForUser(currentUserId, authEmail, authDisplayName)
+        val cleaned = filters
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+        val updated = current.copy(
+            linkedinJobFilters = cleaned,
+            preferredSearchQuery = cleaned.firstOrNull() ?: current.preferredSearchQuery
+        )
+        viewModelScope.launch {
+            repository.saveProfile(currentUserId, updated)
+                .onSuccess { _events.emit(UiEvent.Snackbar("LinkedIn job filters updated!")) }
+                .onFailure { err ->
+                    _events.emit(UiEvent.Snackbar(err.localizedMessage ?: "Failed to save filters.", isError = true))
                 }
         }
     }
@@ -1378,10 +1444,21 @@ class ApplyFlowViewModel(
                         fallbackProfile = baseProfile
                     )
 
+                    val matchedQuery = localInsights.preferredSearchQuery.ifBlank { localInsights.targetRole }
+                    val mergedFilters = if (matchedQuery.isNotBlank()) {
+                        (listOf(matchedQuery) + baseProfile.linkedinJobFilters)
+                            .map { it.trim() }
+                            .filter { it.isNotBlank() }
+                            .distinctBy { it.lowercase() }
+                    } else {
+                        baseProfile.linkedinJobFilters
+                    }
+
                     val updatedLocal = baseProfile.copy(
                         resumeFileName = fileName,
                         currentRole = localInsights.targetRole.ifBlank { baseProfile.currentRole },
-                        preferredSearchQuery = localInsights.preferredSearchQuery.ifBlank { localInsights.targetRole },
+                        preferredSearchQuery = matchedQuery,
+                        linkedinJobFilters = mergedFilters,
                         skillsSummary = localInsights.skillsSummary.ifBlank { baseProfile.skillsSummary },
                         totalExperience = localInsights.totalExperience.ifBlank { baseProfile.totalExperience },
                         resumeSummary = localInsights.resumeSummary.ifBlank { baseProfile.resumeSummary },
@@ -1400,10 +1477,20 @@ class ApplyFlowViewModel(
                         aiRepository.analyzeResumePdfWithGemini(fileName, pdfBytes, extractedText)
                             .onSuccess { aiInsights ->
                                 val latestProfile = (profileState.value as? UiState.Success)?.data ?: updatedLocal
+                                val aiQuery = aiInsights.preferredSearchQuery.ifBlank { latestProfile.preferredSearchQuery }
+                                val aiFilters = if (aiQuery.isNotBlank()) {
+                                    (listOf(aiQuery) + latestProfile.linkedinJobFilters)
+                                        .map { it.trim() }
+                                        .filter { it.isNotBlank() }
+                                        .distinctBy { it.lowercase() }
+                                } else {
+                                    latestProfile.linkedinJobFilters
+                                }
                                 val refined = latestProfile.copy(
                                     resumeFileName = fileName,
                                     currentRole = aiInsights.targetRole.ifBlank { latestProfile.currentRole },
-                                    preferredSearchQuery = aiInsights.preferredSearchQuery.ifBlank { latestProfile.preferredSearchQuery },
+                                    preferredSearchQuery = aiQuery,
+                                    linkedinJobFilters = aiFilters,
                                     skillsSummary = aiInsights.skillsSummary.ifBlank { latestProfile.skillsSummary },
                                     totalExperience = aiInsights.totalExperience.ifBlank { latestProfile.totalExperience },
                                     resumeSummary = aiInsights.resumeSummary.ifBlank { latestProfile.resumeSummary },

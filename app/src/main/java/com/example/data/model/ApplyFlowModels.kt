@@ -49,6 +49,7 @@ data class CandidateProfile(
     val resumeSummary: String = "",
     val resumeFileName: String = "NareshSaini_Resume.pdf",
     val preferredSearchQuery: String = "",
+    val linkedinJobFilters: List<String> = emptyList(),
     val autoFollowUpSend: Boolean = true,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
@@ -75,6 +76,7 @@ data class CandidateProfile(
                 resumeSummary = "Sr. Software Developer at Prologic First India Pvt. Ltd. (Nov 2021 - Present) with 5+ years of experience building scalable enterprise web applications in ASP.NET Core, C#, ASP.NET MVC, and SQL Server. Led Touche POS System, Central Order Taking System (React.js + REST APIs), Store Value Card System, and SpaceTrack. Improved SQL stored procedure efficiency by 60-80%, integrated Hotel/GST/Payment APIs, and migrated legacy VB6 modules to .NET Core. Holds MCA (AKTU) and BCA (MDU).",
                 resumeFileName = "NareshSaini_Resume.pdf",
                 preferredSearchQuery = ".NET Full Stack",
+                linkedinJobFilters = listOf(".NET Full Stack"),
                 autoFollowUpSend = true
             )
         }
